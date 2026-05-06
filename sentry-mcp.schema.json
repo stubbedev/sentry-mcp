@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "sentry-mcp-config",
+  "title": "Sentry MCP Config",
+  "description": "Configuration file for the sentry-mcp MCP server",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "sentry": {
+      "type": "object",
+      "description": "Self-hosted Sentry connection settings",
+      "required": ["url", "token", "org"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of your Sentry instance, e.g. https://sentry.example.com"
+        },
+        "token": {
+          "type": "string",
+          "description": "Sentry API auth token (needs scopes: org:read, project:read, project:write, event:read, event:admin)"
+        },
+        "org": {
+          "type": "string",
+          "description": "Sentry organization slug, e.g. \"my-org\""
+        }
+      }
+    }
+  }
+}
