@@ -258,20 +258,144 @@ export class SentryClient {
   }
 
   // ── Discovery ───────────────────────────────────────────────────────────
-  async listProjects(): Promise<ToolResult> {
-    const { data } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/projects/`);
+  async whoami(): Promise<{ id?: string; username?: string; email?: string; name?: string } | null> {
+    // /auth/ works for both user PATs and org auth tokens; /users/me/ rejects org tokens.
+    try {
+      const { data } = await this.request<Record<string, unknown>>('GET', '/auth/');
+      return {
+        id: typeof data.id === 'string' ? data.id : undefined,
+        username: typeof data.username === 'string' ? data.username : undefined,
+        email: typeof data.email === 'string' ? data.email : undefined,
+        name: typeof data.name === 'string' ? data.name : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async fetchProjects(limit = 100): Promise<Array<{ slug?: string; name?: string; platform?: string }>> {
+    const { data } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/projects/`, {
+      params: { per_page: Math.min(Math.max(limit, 1), 100) },
+    });
+    if (!Array.isArray(data)) return [];
+    return data.map((p) => {
+      const proj = p as Record<string, unknown>;
+      return {
+        slug: typeof proj.slug === 'string' ? proj.slug : undefined,
+        name: typeof proj.name === 'string' ? proj.name : undefined,
+        platform: typeof proj.platform === 'string' ? proj.platform : undefined,
+      };
+    });
+  }
+
+  async listProjects(args: { limit?: number; cursor?: string } = {}): Promise<ToolResult> {
+    const params: Record<string, unknown> = {};
+    params.per_page = Math.min(Math.max(args.limit ?? 100, 1), 100);
+    if (args.cursor) params.cursor = args.cursor;
+    const { data, linkHeader } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/projects/`, { params });
     if (!Array.isArray(data) || data.length === 0) return text('No projects found.');
     const summary = data.map((p) => {
       const proj = p as Record<string, unknown>;
       return `  • ${proj.slug} — ${proj.name}${proj.platform ? ` (${proj.platform})` : ''}`;
     });
-    return text(`Projects in "${this.orgSlug}":\n${summary.join('\n')}`);
+    const nextCursor = this.parseNextCursor(linkHeader);
+    const lines = [`Projects in "${this.orgSlug}":`, ...summary];
+    if (nextCursor) lines.push('', `next_cursor: ${nextCursor}`);
+    return text(lines.join('\n'));
   }
 
-  async listTeams(): Promise<ToolResult> {
-    const { data } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/teams/`);
+  async listTeams(args: { limit?: number; cursor?: string } = {}): Promise<ToolResult> {
+    const params: Record<string, unknown> = {};
+    params.per_page = Math.min(Math.max(args.limit ?? 100, 1), 100);
+    if (args.cursor) params.cursor = args.cursor;
+    const { data, linkHeader } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/teams/`, { params });
     if (!Array.isArray(data) || data.length === 0) return text('No teams found.');
-    return json(data);
+    const nextCursor = this.parseNextCursor(linkHeader);
+    if (!nextCursor) return json(data);
+    return json({ teams: data, next_cursor: nextCursor });
+  }
+
+  async listUsers(args: { query?: string; limit?: number; cursor?: string } = {}): Promise<ToolResult> {
+    const params: Record<string, unknown> = {};
+    if (args.query) params.query = args.query;
+    params.per_page = Math.min(Math.max(args.limit ?? 25, 1), 100);
+    if (args.cursor) params.cursor = args.cursor;
+
+    const { data, linkHeader } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/members/`, { params });
+    if (!Array.isArray(data) || data.length === 0) return text(`No users found${args.query ? ` matching "${args.query}"` : ''}.`);
+
+    const summary = data.map((m) => {
+      const member = m as Record<string, unknown>;
+      const user = (member.user as Record<string, unknown> | null | undefined) ?? {};
+      return {
+        username: user.username ?? member.email,
+        name: user.name ?? member.name,
+        email: user.email ?? member.email,
+        role: member.role,
+      };
+    });
+    const nextCursor = this.parseNextCursor(linkHeader);
+    const payload: Record<string, unknown> = { users: summary, count: summary.length };
+    if (nextCursor) payload.next_cursor = nextCursor;
+    return json(payload);
+  }
+
+  async getDevContext(): Promise<ToolResult> {
+    const me = await this.whoami();
+    const lines: string[] = [];
+    lines.push(`Sentry instance: ${this.baseUrl}`);
+    lines.push(`Organization:    ${this.orgSlug}`);
+    if (me) {
+      const ident = me.username ?? me.email ?? me.name ?? '(unknown)';
+      lines.push(`You:             ${ident}${me.email && me.email !== me.username ? ` <${me.email}>` : ''}`);
+    } else {
+      lines.push('You:             (could not fetch — check token scopes: org:read)');
+    }
+
+    const renderIssues = (issues: unknown[]): string[] => {
+      return issues.map((i) => {
+        const issue = i as Record<string, unknown>;
+        const project = issue.project as Record<string, unknown> | null | undefined;
+        const scope = project?.slug ? ` (${project.slug})` : '';
+        return `  • [${issue.shortId ?? issue.id}] ${issue.title}${scope}`;
+      });
+    };
+
+    try {
+      const { data: assigned } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/issues/`, {
+        params: { query: 'is:unresolved assigned:me', limit: 10 },
+      });
+      lines.push('');
+      if (Array.isArray(assigned) && assigned.length > 0) {
+        lines.push(`Unresolved issues assigned to you (${assigned.length}):`);
+        lines.push(...renderIssues(assigned));
+      } else {
+        lines.push('No unresolved issues assigned to you.');
+      }
+    } catch (err) {
+      lines.push('');
+      lines.push(`Could not fetch assigned issues: ${(err as Error).message}`);
+    }
+
+    try {
+      const { data: recent } = await this.request<unknown[]>('GET', `/organizations/${this.orgSlug}/issues/`, {
+        params: { query: 'is:unresolved', limit: 5, sort: 'new' },
+      });
+      if (Array.isArray(recent) && recent.length > 0) {
+        lines.push('');
+        lines.push('Recent unresolved issues across the org (top 5):');
+        lines.push(...renderIssues(recent));
+      }
+    } catch {
+      // best-effort
+    }
+
+    lines.push('');
+    lines.push('Next steps:');
+    lines.push('  • sentry_search resource=projects — list available projects');
+    lines.push('  • sentry_search projectSlug=<slug> status=unresolved — list issues for a project');
+    lines.push('  • sentry_get_issue issueIdOrUrl=<id|url> — drill into a specific issue');
+    return text(lines.join('\n'));
   }
 
   async listIssues(args: { projectSlug: string; query?: string; status?: string; limit?: number; cursor?: string }): Promise<ToolResult> {
@@ -500,7 +624,7 @@ export class SentryClient {
     });
   }
 
-  async rawApi(args: { endpoint: string; method?: string; params?: Record<string, unknown>; body?: unknown; grepPattern?: string }): Promise<ToolResult> {
+  async rawApi(args: { endpoint: string; method?: string; params?: Record<string, unknown>; body?: unknown; grepPattern?: string; maxChars?: number; charOffset?: number }): Promise<ToolResult> {
     const method = (args.method ?? 'GET').toUpperCase();
     if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method)) throw new Error(`Unsupported HTTP method: ${method}`);
     // Strip optional /api/0/ prefix so callers can copy URLs from docs.
@@ -509,21 +633,35 @@ export class SentryClient {
 
     const { data } = await this.request<unknown>(method, path, { params: args.params, body: args.body });
 
-    let result: unknown = data;
-    const jsonStr = JSON.stringify(result, null, 2);
+    const filtered = args.grepPattern ? grepFilter(data, args.grepPattern) : data;
+    const jsonStr = JSON.stringify(filtered, null, 2);
+
+    // Explicit paging takes precedence over the token-size warning.
+    const offset = args.charOffset ?? 0;
+    const maxChars = args.maxChars ?? 0;
+    if (offset > 0 || maxChars > 0) {
+      const limit = maxChars > 0 ? maxChars : jsonStr.length;
+      const chunk = jsonStr.slice(offset, offset + limit);
+      const remaining = jsonStr.length - offset - chunk.length;
+      const suffix = remaining > 0 ? `\n\n... (${remaining} more chars, use charOffset=${offset + chunk.length})` : '';
+      return text(chunk + suffix);
+    }
+
     const estimatedTokens = Math.ceil(jsonStr.length / 4);
     if (estimatedTokens > 20000 && !args.grepPattern) {
       return text([
-        `WARNING: Response is approximately ${estimatedTokens} tokens.`,
+        `WARNING: Response is approximately ${estimatedTokens} tokens (${jsonStr.length} chars).`,
         '',
-        'This endpoint returns a lot of data. Re-run with grepPattern to filter.',
-        'Suggested patterns:',
+        'This endpoint returns a lot of data. Re-run with one of:',
+        '  - grepPattern="..." to filter inline',
+        '  - maxChars=8000 charOffset=0 to page through',
+        '',
+        'Suggested grep patterns:',
         '  - Stack frames: \'"function":|"filename":|"in_app":\'',
         '  - Breadcrumbs:  \'"breadcrumbs"\'',
         '  - Tags:         \'"tags"\'',
       ].join('\n'));
     }
-    if (args.grepPattern) result = grepFilter(result, args.grepPattern);
-    return json(result);
+    return text(jsonStr);
   }
 }

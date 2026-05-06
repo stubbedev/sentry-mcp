@@ -8,16 +8,22 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **s
 
 ## Tools
 
+### Workflow
+
+| Tool | Description |
+|---|---|
+| `sentry_get_dev_context` | Master entry point: configured instance + org, your Sentry identity, unresolved issues assigned to you, and recent unresolved issues across the org |
+
 ### Discovery & read
 
 | Tool | Description |
 |---|---|
-| `sentry_search` | Discover resources: `issues` (default), `projects`, or `teams` via `resource` param |
+| `sentry_search` | Discover resources: `issues` (default), `projects`, `teams`, or `users` via `resource` param. Use `users` to look up valid usernames before assignment. |
 | `sentry_get_issue` | Full details for one issue (by ID or URL) with field/grep/stack-frame filtering to keep responses small |
 | `sentry_get_event` | Full details for one event with smart entry prioritisation and pagination |
 | `sentry_stack_frames` | Structured stack-trace frames only (function/file/line/inApp) — best for debug analysis |
 | `sentry_check_dsym` | Check whether iOS/macOS/Android debug symbols are missing for an event |
-| `sentry_raw_api` | Raw call to any Sentry API endpoint with optional `grepPattern` filtering |
+| `sentry_raw_api` | Raw call to any Sentry API endpoint with optional `grepPattern` or `maxChars`/`charOffset` paging |
 
 ### Mutation
 
@@ -26,9 +32,13 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **s
 | `sentry_mutate_issue` | Update status, assign, and/or add a comment on an issue in one call |
 | `sentry_comment` | Add, update, or delete a comment on an issue (`action`: `add` / `update` / `delete`) |
 
+Many tools accept `project` as an alias for `projectSlug`.
+
 ### Natural language examples
 
+- "what am I working on?" → `sentry_get_dev_context`
 - "list projects in this org" → `sentry_search` with `resource=projects`
+- "find user alice" → `sentry_search` with `resource=users`, `query=alice`
 - "show unresolved issues in my-web-app" → `sentry_search` with `projectSlug`, `status=unresolved`
 - "what's issue 5217" → `sentry_get_issue` with `issueIdOrUrl=5217`
 - "give me the stack trace for event abc123 in apple-ios" → `sentry_stack_frames`
