@@ -1,6 +1,6 @@
 {
   "name": "@stubbedev/sentry-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MCP server for self-hosted Sentry",
   "license": "MIT",
   "type": "module",
