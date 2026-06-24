@@ -64,6 +64,19 @@ func getConfigPath() string {
 			return homeConfig
 		}
 	}
+	// XDG location: $XDG_CONFIG_HOME/sentry-mcp/config.json (default ~/.config).
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	if xdg == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			xdg = filepath.Join(home, ".config")
+		}
+	}
+	if xdg != "" {
+		xdgConfig := filepath.Join(xdg, "sentry-mcp", "config.json")
+		if fileExists(xdgConfig) {
+			return xdgConfig
+		}
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		cwdConfig := filepath.Join(cwd, ".sentry-mcp.json")
 		if fileExists(cwdConfig) {

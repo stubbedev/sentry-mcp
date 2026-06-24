@@ -79,7 +79,7 @@ SENTRY_AUTH_TOKEN=your-sentry-auth-token
 SENTRY_ORG_SLUG=your-org-slug
 ```
 
-Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONFIG` env var → `~/.sentry-mcp.json` → `.sentry-mcp.json` in cwd → environment variables.
+Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONFIG` env var → `~/.sentry-mcp.json` → `$XDG_CONFIG_HOME/sentry-mcp/config.json` (defaults to `~/.config/sentry-mcp/config.json`) → `.sentry-mcp.json` in cwd → environment variables.
 
 ### 2. Connect to your AI tool
 
