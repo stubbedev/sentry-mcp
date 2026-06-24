@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**, written in Go. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
 
-Distributed two ways: a zero-dependency **prebuilt binary** (run directly or via `go install`) and an **npm wrapper** (`npx @stubbedev/sentry-mcp`) that downloads the matching binary — so every config below works unchanged.
+Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it four interchangeable ways — `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses default to compact [TOON](#output-format-toon) to save tokens.
 
 > **Note:** This server targets self-hosted Sentry installs. It will also work against sentry.io, but the official Sentry MCP is a better fit there.
 
@@ -83,9 +83,16 @@ Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONF
 
 ### 2. Connect to your AI tool
 
-No cloning or building required — just point your tool at `npx @stubbedev/sentry-mcp@latest` and it will install and run automatically.
+#### Which run method should I use?
 
-> Note: `--prefer-online` can break MCP startup in some clients. Keep the command simple and use the update steps below when you want to refresh.
+| Method | Best for | Trade-off |
+|---|---|---|
+| **`go install` / prebuilt binary / Nix** | Lowest overhead — the MCP client execs the native binary directly, **no Node process** | You manage updates (re-run `go install`, or `nix run` re-resolves on each launch) |
+| **`npx @latest`** | Easiest, zero install, always the newest version | Auto-downloads the matching binary, but leaves one small idle Node process for the session (zero per-call latency — stdio is inherited) |
+
+**Recommendation:** for day-to-day use point your client at the native binary (`go install` or Nix) for the leanest process; reach for `npx` when you want zero setup or pinned auto-updates. All the client configs below are interchangeable — swap the `command`/`args` for whichever method you picked.
+
+> Note: with `npx`, `--prefer-online` can break MCP startup in some clients. Keep the command simple and use the [update steps](#updating-existing-installs) when you want to refresh.
 
 ---
 
@@ -291,17 +298,16 @@ Each release ships **both** prebuilt Go binaries (attached to the GitHub release
 
 Use semantic versioning. Breaking tool-surface changes should bump the minor version while `<1.0.0` (for example `0.0.x` -> `0.1.0`).
 
-Release flow:
+Release flow — use the helper scripts (they run `go vet` + `go test` + `smoke` via `preversion`, bump `package.json`, then commit, tag, and push):
 
 ```bash
-# 1. bump the version in package.json (the npm wrapper version === the tag,
-#    and the binary embeds it via -ldflags -X main.Version)
-#    e.g. set "version": "0.1.5"
+npm run release:patch   # or release:minor / release:major
+```
 
-# 2. commit, tag, and push
-git commit -am "0.1.5"
-git tag v0.1.5
-git push origin HEAD --follow-tags
+This runs `npm version <type>` (which creates the version commit and `vX.Y.Z` tag) then `git push --follow-tags`, which triggers `publish.yml`. Equivalent by hand:
+
+```bash
+git commit -am "0.2.2" && git tag v0.2.2 && git push origin HEAD --follow-tags
 ```
 
 The publish workflow verifies that `package.json` version matches the tag before publishing.
@@ -335,19 +341,16 @@ Paste the token as `sentry.token` in your config file.
 
 ## Development
 
-Requires Go 1.26+. Zero third-party dependencies — the server uses only the standard library.
+Requires Go 1.26+. The only third-party dependency is the TOON encoder (`github.com/toon-format/toon-go`); everything else is the standard library.
 
 ```bash
-# Build
-go build -o sentry-mcp .
+go build -o sentry-mcp .   # build (or: npm run build)
+go vet ./...               # vet
+go test ./...              # unit tests (or: npm run test)
+npm run smoke              # build + validate tools/list
+./sentry-mcp               # run directly
 
-# Run directly
-./sentry-mcp
-
-# Vet
-go vet ./...
-
-# Test the tool list (smoke)
+# Inspect the tool list by hand
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | ./sentry-mcp
 ```
 
@@ -357,4 +360,10 @@ To use a specific config file:
 ./sentry-mcp --config /path/to/config.json
 ```
 
-Tool schemas live in `tools.json` (embedded into the binary via `go:embed`). The npm wrapper lives in `bin/cli.mjs` + `scripts/`.
+Layout:
+- `main.go` — JSON-RPC stdio loop, protocol, tool dispatch, instructions
+- `sentry.go` — Sentry API client, tool handlers, TOON/JSON rendering, helpers
+- `config.go` — config resolution (`--config` / env / file / XDG)
+- `tools.json` — tool schemas, embedded into the binary via `go:embed`
+- `bin/cli.mjs` + `scripts/` — npm wrapper (downloads + execs the binary)
+- `flake.nix` — Nix package / app / dev shell
