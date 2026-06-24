@@ -3,9 +3,11 @@ node_modules/
 
 # build output
 dist/
+/sentry-mcp
+/sentry-mcp.exe
+bin/sentry-mcp-native
+bin/sentry-mcp-native.exe
 
 # config & secrets
 .env
 .sentry-mcp.json
-
-# package-lock.json is tracked for reproducible installs (required by npm ci in CI)

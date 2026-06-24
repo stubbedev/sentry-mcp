@@ -1,6 +1,8 @@
 # sentry-mcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**, written in Go. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
+
+Distributed two ways: a zero-dependency **prebuilt binary** (run directly or via `go install`) and an **npm wrapper** (`npx @stubbedev/sentry-mcp`) that downloads the matching binary — so every config below works unchanged.
 
 > **Note:** This server targets self-hosted Sentry installs. It will also work against sentry.io, but the official Sentry MCP is a better fit there.
 
@@ -183,9 +185,27 @@ mcpServers:
 
 ---
 
+#### Go install (no npm)
+
+If you have Go installed and prefer a native binary on your `PATH`:
+
+```bash
+go install github.com/stubbedev/sentry-mcp@latest
+```
+
+Then point your MCP client at the `sentry-mcp` command directly, e.g. for Claude Code:
+
+```bash
+claude mcp add sentry -- sentry-mcp --config ~/.sentry-mcp.json
+```
+
+Prebuilt binaries for every platform are also attached to each [GitHub release](https://github.com/stubbedev/sentry-mcp/releases) if you'd rather not build.
+
+---
+
 #### Any other MCP-compatible tool
 
-Most tools that support MCP accept the same JSON format. Use `npx` as the command with `["-y", "@stubbedev/sentry-mcp@latest", "--config", "/path/to/config.json"]` as the args.
+Most tools that support MCP accept the same JSON format. Use `npx` as the command with `["-y", "@stubbedev/sentry-mcp@latest", "--config", "/path/to/config.json"]` as the args — or the `sentry-mcp` binary directly.
 
 ### Updating existing installs
 
@@ -201,22 +221,35 @@ Then restart your MCP client.
 
 ### Manual install (optional)
 
-If you prefer to clone and run locally:
+If you prefer to clone and build locally (requires Go 1.26+):
 
 ```bash
 git clone git@github.com:stubbedev/sentry-mcp.git
 cd sentry-mcp
-npm install
-npm run build
+go build -o sentry-mcp .
 ```
 
-Then use `node /path/to/sentry-mcp/dist/index.js` instead of the `npx` command in the configs above.
+Then use `/path/to/sentry-mcp/sentry-mcp` instead of the `npx` command in the configs above.
+
+---
+
+## Output format (TOON)
+
+Structured responses are serialized as [TOON](https://github.com/toon-format/toon) (Token-Oriented Object Notation) by default — a compact, LLM-friendly format that cuts ~30-60% of the tokens of equivalent JSON, with the biggest savings on uniform tables (issue lists, stack frames, users). Example:
+
+```
+users[2]{email,name,role,username}:
+  alice@example.com,Alice,owner,alice
+  bob@example.com,Bob,member,bob
+```
+
+Every data tool accepts `format` (`toon` | `json`) to override per call, and the env var `SENTRY_MCP_FORMAT=json` flips the default process-wide. Plain-text tools (`sentry_get_dev_context`, project listings, mutation/comment confirmations) are unaffected.
 
 ---
 
 ## Filtering large responses
 
-Sentry events can blow past LLM context limits — a single event with a long stack trace and many breadcrumbs is easily 100K+ tokens. The tools have several knobs to keep responses small:
+Sentry events can blow past LLM context limits — a single event with a long stack trace and many breadcrumbs is easily 100K+ tokens. On top of TOON, the tools have several knobs to keep responses small:
 
 - `sentry_get_issue`: pass `maxStackFrames=5`, `excludeFields=["stats","annotations"]`, or `grepPattern="AttributeError|process_activity"` to slim things down. Use `includeFields=["id","title","latest_event.entries"]` for the absolute minimum.
 - `sentry_get_event`: defaults to 5 prioritised entries; pass `entryType="exception"` to focus on a stack trace, or `limit`/`offset` to page through.
@@ -227,29 +260,27 @@ Sentry events can blow past LLM context limits — a single event with a long st
 
 ## Releases (Maintainers)
 
-This package is published to npm as `@stubbedev/sentry-mcp`.
+Each release ships **both** prebuilt Go binaries (attached to the GitHub release) and the npm wrapper `@stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — attaches them to the GitHub release, then publishes the npm package.
 
-Use semantic versioning for releases. Breaking tool-surface changes should bump the minor version while `<1.0.0` (for example `0.0.x` -> `0.1.0`).
-
-Automatic publish is configured in `.github/workflows/publish.yml` and runs when a new version tag is pushed.
+Use semantic versioning. Breaking tool-surface changes should bump the minor version while `<1.0.0` (for example `0.0.x` -> `0.1.0`).
 
 Release flow:
 
 ```bash
-# choose one: patch | minor | major
-increment=patch
+# 1. bump the version in package.json (the npm wrapper version === the tag,
+#    and the binary embeds it via -ldflags -X main.Version)
+#    e.g. set "version": "0.1.5"
 
-# bumps package.json + package-lock.json,
-# creates a version commit, and creates a git tag (for example v0.1.17)
-npm version "$increment"
-
-# push commit and tag to GitHub
+# 2. commit, tag, and push
+git commit -am "0.1.5"
+git tag v0.1.5
 git push origin HEAD --follow-tags
 ```
 
-GitHub Actions will publish the npm release from that pushed tag.
+The publish workflow verifies that `package.json` version matches the tag before publishing.
 
-- The workflow is configured for npm Trusted Publisher (OIDC), so no `NPM_TOKEN` secret is required
+- The npm step uses npm Trusted Publisher (OIDC), so no `NPM_TOKEN` secret is required
+- The release step uses the default `GITHUB_TOKEN`
 
 Required npm setup (one-time):
 
@@ -276,22 +307,26 @@ Paste the token as `sentry.token` in your config file.
 
 ## Development
 
+Requires Go 1.26+. Zero third-party dependencies — the server uses only the standard library.
+
 ```bash
-# Watch mode — recompiles on file changes
-npm run dev
+# Build
+go build -o sentry-mcp .
 
-# Run the built server directly
-node dist/index.js
+# Run directly
+./sentry-mcp
 
-# Test the tool list
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node dist/index.js
+# Vet
+go vet ./...
 
-# Quick release smoke check
-npm run smoke
+# Test the tool list (smoke)
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | ./sentry-mcp
 ```
 
 To use a specific config file:
 
 ```bash
-node dist/index.js --config /path/to/config.json
+./sentry-mcp --config /path/to/config.json
 ```
+
+Tool schemas live in `tools.json` (embedded into the binary via `go:embed`). The npm wrapper lives in `bin/cli.mjs` + `scripts/`.
