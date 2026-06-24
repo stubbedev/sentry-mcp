@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build -o sentry-mcp .
+
+      - name: Smoke — tools/list
+        run: |
+          OUT="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            | SENTRY_URL=https://smoke.invalid SENTRY_AUTH_TOKEN=smoke SENTRY_ORG_SLUG=smoke ./sentry-mcp)"
+          echo "$OUT" | node -e '
+            let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+              const r=JSON.parse(d.trim());
+              if(r.error)throw new Error("server error: "+r.error.message);
+              const t=r.result?.tools;
+              if(!Array.isArray(t)||!t.length)throw new Error("no tools in response");
+              const bad=t.filter(x=>!x.name||!x.inputSchema);
+              if(bad.length)throw new Error("malformed tools: "+bad.map(x=>x.name??"(unnamed)").join(", "));
+              console.log("smoke OK — "+t.length+" tool(s): "+t.map(x=>x.name).join(", "));
+            });'
