@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 // Version is read from the embedded package.json (see tools.go) so every build
@@ -29,6 +33,18 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+}
+
+// rpcIncoming is a superset that matches both inbound requests/notifications
+// (have a method) and inbound responses to server-initiated requests (have
+// result/error and no method).
+type rpcIncoming struct {
+	Jsonrpc string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
+	Result  json.RawMessage `json:"result"`
+	Error   *rpcError       `json:"error"`
 }
 
 type rpcError struct {
@@ -74,62 +90,116 @@ func main() {
 		os.Exit(0)
 	}()
 
-	reader := bufio.NewReader(os.Stdin)
-	writer := bufio.NewWriter(os.Stdout)
+	// Transport selection: HTTP when --http / SENTRY_MCP_HTTP_ADDR is set,
+	// otherwise the default stdio transport.
+	if addr := httpAddr(); addr != "" {
+		if err := serveHTTP(addr, httpPath(), instructions); err != nil {
+			logf("http server error: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
+	serveStdio(instructions)
+}
+
+// serveStdio runs the newline-delimited JSON-RPC loop over stdin/stdout. The
+// connection is bidirectional: the server can issue requests to the client
+// (e.g. roots/list), so each inbound request is handled in its own goroutine to
+// keep the read loop free to deliver the client's responses.
+func serveStdio(instructions string) {
+	writer := bufio.NewWriter(os.Stdout)
+	var writeMu sync.Mutex
+	write := func(b []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		writer.Write(b)
+		writer.WriteByte('\n')
+		return writer.Flush()
+	}
+	p := &peer{send: write, reg: newPendingRegistry()}
+
+	var wg sync.WaitGroup
+	reader := bufio.NewReader(os.Stdin)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			handleLine(line, instructions, writer)
-			writer.Flush()
+			handleMessage(line, instructions, p, write, &wg)
 		}
 		if err != nil {
-			if err == io.EOF {
-				return
+			if err != io.EOF {
+				logf("read error: %v", err)
 			}
-			logf("read error: %v", err)
+			wg.Wait() // let in-flight handlers flush their responses
 			return
 		}
 	}
 }
 
-func handleLine(line []byte, instructions string, writer *bufio.Writer) {
-	trimmed := strings.TrimSpace(string(line))
-	if trimmed == "" {
+// handleMessage parses one JSON-RPC message. Responses (client replies to
+// server-initiated requests) are routed to the waiting caller; requests are
+// dispatched in a goroutine so a handler that calls back to the client does not
+// block the read loop. Notifications are handled inline.
+func handleMessage(raw []byte, instructions string, p *peer, write func([]byte) error, wg *sync.WaitGroup) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return
 	}
-	var req rpcRequest
-	if err := json.Unmarshal([]byte(trimmed), &req); err != nil {
-		// Cannot parse — without an id we cannot respond meaningfully.
+	var in rpcIncoming
+	if err := json.Unmarshal(trimmed, &in); err != nil {
 		logf("parse error: %v", err)
 		return
 	}
-	isNotification := len(req.ID) == 0
-
-	result, rerr := dispatch(&req, instructions)
-
-	if isNotification {
-		return // Notifications get no response.
+	if in.Method == "" && len(in.ID) > 0 {
+		p.reg.deliver(idKey(in.ID), rpcReply{Result: in.Result, Error: in.Error})
+		return
 	}
+
+	req := rpcRequest{Jsonrpc: in.Jsonrpc, ID: in.ID, Method: in.Method, Params: in.Params}
+	if len(req.ID) == 0 {
+		dispatch(&req, instructions, p) // notification — no response
+		return
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resp, _ := processRequest(&req, instructions, p)
+		b, _ := json.Marshal(resp)
+		write(b)
+	}()
+}
+
+// processRequest dispatches a request and builds its response. The bool is
+// false for notifications (caller should not write a response).
+func processRequest(req *rpcRequest, instructions string, p *peer) (rpcResponse, bool) {
+	if len(req.ID) == 0 {
+		dispatch(req, instructions, p)
+		return rpcResponse{}, false
+	}
+	result, rerr := dispatch(req, instructions, p)
 	resp := rpcResponse{Jsonrpc: "2.0", ID: req.ID}
 	if rerr != nil {
 		resp.Error = rerr
 	} else {
 		resp.Result = result
 	}
-	out, _ := json.Marshal(resp)
-	writer.Write(out)
-	writer.WriteByte('\n')
+	return resp, true
 }
 
-func dispatch(req *rpcRequest, instructions string) (any, *rpcError) {
+func dispatch(req *rpcRequest, instructions string, p *peer) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
-		var p struct {
+		var params struct {
 			ProtocolVersion string `json:"protocolVersion"`
+			Capabilities    struct {
+				Roots *json.RawMessage `json:"roots"`
+			} `json:"capabilities"`
 		}
-		json.Unmarshal(req.Params, &p)
-		protocol := p.ProtocolVersion
+		json.Unmarshal(req.Params, &params)
+		if p != nil && params.Capabilities.Roots != nil {
+			p.markRootsCapable()
+		}
+		protocol := params.ProtocolVersion
 		if protocol == "" {
 			protocol = defaultProtocolVersion
 		}
@@ -143,6 +213,12 @@ func dispatch(req *rpcRequest, instructions string) (any, *rpcError) {
 	case "notifications/initialized", "notifications/cancelled":
 		return nil, nil
 
+	case "notifications/roots/list_changed":
+		if p != nil {
+			p.invalidateRoots()
+		}
+		return nil, nil
+
 	case "ping":
 		return map[string]any{}, nil
 
@@ -150,14 +226,14 @@ func dispatch(req *rpcRequest, instructions string) (any, *rpcError) {
 		return map[string]any{"tools": toolList()}, nil
 
 	case "tools/call":
-		var p struct {
+		var params struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, &rpcError{Code: codeInvalidRequest, Message: "invalid params: " + err.Error()}
 		}
-		return callTool(p.Name, p.Arguments)
+		return callTool(params.Name, params.Arguments, p)
 
 	default:
 		return nil, &rpcError{Code: codeMethodNotFound, Message: "Method not found: " + req.Method}
@@ -185,9 +261,38 @@ func requireSentry() (*SentryClient, *rpcError) {
 	return sentry, nil
 }
 
+// callMu serializes tool calls. renderFormat and the sentry client are
+// package globals set per-call; the stdio loop is inherently serial, but the
+// HTTP transport may dispatch requests concurrently, so we serialize here to
+// keep those globals race-free. Tool calls are I/O-bound on the Sentry API, so
+// serialization costs little in practice.
+var callMu sync.Mutex
+
+// activePeer is the client connection for the in-flight tool call. Set under
+// callMu so tool handlers can reach the client (e.g. to fetch workspace roots).
+var activePeer *peer
+
+// callCtx bounds the in-flight tool call. Set under callMu; consulted by Sentry
+// requests and roots/list so no single tool call can hang the server (and, with
+// it, every other call waiting on callMu).
+var callCtx context.Context
+
+// toolCallTimeout caps total wall-clock for one tool call, including any
+// sequential Sentry requests and a roots/list round-trip.
+const toolCallTimeout = 60 * time.Second
+
 // callTool dispatches a tools/call. A returned *rpcError is a protocol-level
 // error; a tool-execution error is returned as an isError tool result.
-func callTool(name string, rawArgs map[string]any) (any, *rpcError) {
+func callTool(name string, rawArgs map[string]any, p *peer) (any, *rpcError) {
+	callMu.Lock()
+	defer callMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), toolCallTimeout)
+	defer cancel()
+	callCtx = ctx
+	activePeer = p
+	defer func() { callCtx = nil; activePeer = nil }()
+
 	args := normalizeArgs(rawArgs)
 	renderFormat = pickFormat(args)
 

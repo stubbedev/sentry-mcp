@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -409,7 +410,11 @@ func (c *SentryClient) request(method, path string, params map[string]any, body 
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequest(method, fullURL, reqBody)
+	ctx := callCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 	if err != nil {
 		return apiResponse{}, err
 	}
@@ -667,6 +672,21 @@ func (c *SentryClient) getDevContext() (toolResult, error) {
 		lines = append(lines, "You:             "+id+suffix)
 	} else {
 		lines = append(lines, "You:             (could not fetch — check token scopes: org:read)")
+	}
+
+	// Workspace roots handed to the server by the MCP client (roots/list or a
+	// proxy-set header). These are the repo/working-tree a shell-calling tool
+	// would operate in.
+	if roots := activePeer.listRoots(); len(roots) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "Workspace roots (from MCP client):")
+		for _, r := range roots {
+			label := r.path()
+			if r.Name != "" {
+				label = r.Name + " — " + label
+			}
+			lines = append(lines, "  • "+label)
+		}
 	}
 
 	renderIssues := func(issues []any) []string {

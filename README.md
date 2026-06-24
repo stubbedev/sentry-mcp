@@ -241,6 +241,75 @@ The package `version` is read from `package.json` (so it follows releases), and 
 
 Most tools that support MCP accept the same JSON format. Use `npx` as the command with `["-y", "@stubbedev/sentry-mcp@latest", "--config", "/path/to/config.json"]` as the args — or the `sentry-mcp` binary directly.
 
+### HTTP transport (behind a proxy)
+
+By default the server speaks JSON-RPC over **stdio**. It can also serve the MCP
+**Streamable HTTP** transport on a single endpoint — useful when running behind a
+reverse proxy or sharing one process across clients.
+
+Enable it with `--http` (or the `SENTRY_MCP_HTTP_ADDR` env var):
+
+```bash
+./sentry-mcp --http                       # listen on 127.0.0.1:8765/mcp
+./sentry-mcp --http=0.0.0.0:8765          # bind all interfaces (put a proxy in front)
+./sentry-mcp --http --http-path=/sentry   # custom endpoint path
+```
+
+| Flag | Env | Default |
+| --- | --- | --- |
+| `--http[=addr]` | `SENTRY_MCP_HTTP_ADDR` (or `SENTRY_MCP_HTTP=1`) | `127.0.0.1:8765` |
+| `--http-path=<path>` | `SENTRY_MCP_HTTP_PATH` | `/mcp` |
+
+Behaviour:
+
+- Clients **POST** a JSON-RPC request (or a batch array) and get the JSON-RPC
+  response in the body.
+- **Sessions**: `initialize` returns an `Mcp-Session-Id` header; include it on
+  every subsequent request. `DELETE` ends a session; idle sessions expire after
+  30 minutes.
+- Notifications (no `id`) return `202 Accepted` with no body.
+- `GET` opens an **SSE stream** (`text/event-stream`) for server→client messages,
+  scoped to the session — used to request workspace roots (see below).
+- `GET /healthz` returns `{"status":"ok"}` for liveness probes.
+- The default host is loopback so the server is not accidentally exposed; set an
+  explicit host to listen wider, and front it with TLS/auth at the proxy.
+
+Sentry credentials still come from the config file / env vars — the whole server
+uses one Sentry identity.
+
+#### Workspace roots (cwd / repo root)
+
+So the server can know which repo/working-tree it is acting on (e.g. for a future
+shell-calling tool), it accepts the working root two ways:
+
+1. **MCP roots** — if the client advertises the `roots` capability at
+   `initialize`, the server requests `roots/list` over the SSE stream and caches
+   the result (refreshed on `notifications/roots/list_changed`).
+2. **Proxy header** — a reverse proxy/harness can pin the root directly with a
+   request header, avoiding the round-trip. Accepted headers (comma-separated for
+   multiple, `file://` URI or plain path):
+
+   ```
+   X-Mcp-Root: file:///srv/myrepo
+   X-Mcp-Roots: /srv/a, /srv/b
+   ```
+
+   A header value takes precedence over `roots/list`.
+
+The resolved roots are shown in `sentry_get_dev_context`. (No tool shells out
+today, so roots are currently informational — the plumbing is in place for when
+one does.)
+
+Quick check:
+
+```bash
+SID=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:8765/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d '\r')
+curl -s -X POST http://127.0.0.1:8765/mcp -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
 ### Updating existing installs
 
 If your MCP client is already configured and you want the newest package version:
@@ -361,7 +430,9 @@ To use a specific config file:
 ```
 
 Layout:
-- `main.go` — JSON-RPC stdio loop, protocol, tool dispatch, instructions
+- `main.go` — transport selection, JSON-RPC stdio loop, protocol, tool dispatch, instructions
+- `http.go` — MCP Streamable HTTP transport: sessions, SSE stream, header roots (`--http`)
+- `peer.go` — client connection (server→client requests), pending-request registry, workspace roots
 - `sentry.go` — Sentry API client, tool handlers, TOON/JSON rendering, helpers
 - `config.go` — config resolution (`--config` / env / file / XDG)
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`
