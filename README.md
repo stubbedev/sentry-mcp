@@ -203,6 +203,33 @@ Prebuilt binaries for every platform are also attached to each [GitHub release](
 
 ---
 
+#### Nix (flake)
+
+The repo is a flake exposing a `sentry-mcp` package, app, and dev shell. Run it directly:
+
+```bash
+nix run github:stubbedev/sentry-mcp -- --config ~/.sentry-mcp.json
+```
+
+Or consume it from your own flake:
+
+```nix
+{
+  inputs.sentry-mcp.url = "github:stubbedev/sentry-mcp";
+  # ... then use inputs.sentry-mcp.packages.${system}.default
+}
+```
+
+For an MCP client, point the command at the built binary, e.g.:
+
+```bash
+claude mcp add sentry -- nix run github:stubbedev/sentry-mcp -- --config ~/.sentry-mcp.json
+```
+
+The package `version` is read from `package.json` (so it follows releases), and CI keeps `vendorHash` current automatically — see [Releases](#releases-maintainers).
+
+---
+
 #### Any other MCP-compatible tool
 
 Most tools that support MCP accept the same JSON format. Use `npx` as the command with `["-y", "@stubbedev/sentry-mcp@latest", "--config", "/path/to/config.json"]` as the args — or the `sentry-mcp` binary directly.
@@ -281,6 +308,7 @@ The publish workflow verifies that `package.json` version matches the tag before
 
 - The npm step uses npm Trusted Publisher (OIDC), so no `NPM_TOKEN` secret is required
 - The release step uses the default `GITHUB_TOKEN`
+- The **Nix flake auto-tracks releases**: `flake.nix` reads its `version` from `package.json`, so bumping the version updates the flake too. The `Flake` workflow (`.github/workflows/flake.yml`) recomputes `vendorHash` on any change to `go.mod`/`go.sum`/sources and commits it back, so `nix build` always works against `master`.
 
 Required npm setup (one-time):
 

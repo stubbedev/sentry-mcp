@@ -8,6 +8,10 @@ dist/
 bin/sentry-mcp-native
 bin/sentry-mcp-native.exe
 
+# nix build output
+result
+result-*
+
 # config & secrets
 .env
 .sentry-mcp.json
