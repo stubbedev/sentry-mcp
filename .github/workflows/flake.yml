@@ -35,6 +35,18 @@ jobs:
       - name: Build check (compiles + runs go test via doCheck)
         run: nix build .#default --no-link --print-build-logs
 
+      # Push the built x86_64-linux closure to the Attic cache so consumers can
+      # substitute it instead of rebuilding. Only on master pushes — PRs (incl.
+      # from forks) don't get the token. Needs the ATTIC_TOKEN repo secret.
+      - name: Push to Attic cache
+        if: github.event_name != 'pull_request'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          nix profile install nixpkgs#attic-client
+          attic login stubbe https://nix.stubbe.dev "$ATTIC_TOKEN"
+          attic push stubbe:default "$(nix build .#default --no-link --print-out-paths)"
+
       - name: Commit updated vendorHash
         if: github.event_name != 'pull_request'
         run: |

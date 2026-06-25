@@ -3,6 +3,15 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # CI (.github/workflows/flake.yml) pushes the built x86_64-linux closure to
+  # this Attic cache. Consumers get it automatically with --accept-flake-config,
+  # or by copying these two lines into their own nix.conf. Cache is public, so
+  # no auth/token is needed to pull.
+  nixConfig = {
+    extra-substituters = [ "https://nix.stubbe.dev/default" ];
+    extra-trusted-public-keys = [ "default:9P4FePqHV1rGv5NDBun0GN26y83pcaaMr/NHZrxKaac=" ];
+  };
+
   outputs = { self, nixpkgs }:
     let
       # Version tracks the npm wrapper / git tag automatically: it is read from
