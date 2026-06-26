@@ -27,11 +27,18 @@ jobs:
 
       - name: Smoke — tools/list
         run: |
-          OUT="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+          # The official MCP SDK requires the initialize handshake before any
+          # request. The trailing sleep holds stdin open so the server flushes
+          # its responses before EOF tears the stdio transport down.
+          OUT="$({ printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; sleep 1; } \
             | SENTRY_URL=https://smoke.invalid SENTRY_AUTH_TOKEN=smoke SENTRY_ORG_SLUG=smoke ./sentry-mcp)"
           echo "$OUT" | node -e '
             let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
-              const r=JSON.parse(d.trim());
+              const r=d.trim().split("\n").map(l=>JSON.parse(l)).find(m=>m.id===2);
+              if(!r)throw new Error("no tools/list response");
               if(r.error)throw new Error("server error: "+r.error.message);
               const t=r.result?.tools;
               if(!Array.isArray(t)||!t.length)throw new Error("no tools in response");
