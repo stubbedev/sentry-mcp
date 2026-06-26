@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -38,35 +37,5 @@ func TestParseRootHeaders(t *testing.T) {
 
 	if got := parseRootHeaders(http.Header{}); got != nil {
 		t.Errorf("empty headers should yield nil, got %+v", got)
-	}
-}
-
-func TestIdKey(t *testing.T) {
-	cases := map[string]string{
-		`"srv-1"`: "srv-1", // string id
-		`42`:      "42",    // numeric id
-	}
-	for raw, want := range cases {
-		if got := idKey(json.RawMessage(raw)); got != want {
-			t.Errorf("idKey(%s) = %q, want %q", raw, got, want)
-		}
-	}
-}
-
-func TestPeerListRootsHeaderWins(t *testing.T) {
-	p := &peer{reg: newPendingRegistry()}
-	p.markRootsCapable()
-	p.setHeaderRoots([]mcpRoot{{URI: "/srv/header"}})
-
-	// send is nil and headerRoots is set, so listRoots must not attempt a call.
-	roots := p.listRoots()
-	if len(roots) != 1 || roots[0].URI != "/srv/header" {
-		t.Fatalf("header roots not returned: %+v", roots)
-	}
-
-	// list_changed must not clear header-pinned roots.
-	p.invalidateRoots()
-	if got := p.listRoots(); len(got) != 1 {
-		t.Errorf("header roots cleared by invalidate: %+v", got)
 	}
 }

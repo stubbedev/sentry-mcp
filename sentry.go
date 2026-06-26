@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	toon "github.com/toon-format/toon-go"
 )
 
@@ -31,15 +32,27 @@ func textResult(t string) toolResult {
 	return toolResult{Content: []contentBlock{{Type: "text", Text: t}}}
 }
 
-// renderFormat selects how structured data tools serialize their output:
-// "toon" (default — token-efficient) or "json". Set per request in callTool.
-// The MCP request loop is serial, so a package-level var is safe.
-var renderFormat = "toon"
+// formatKey carries the per-call output format ("toon" or "json") on the
+// request context, so concurrent tool calls render independently without any
+// shared package state. ponytail: context value, not a param threaded through
+// every render site — set once in the handler, read in renderString.
+type formatKey struct{}
 
-// renderString serializes v in the active output format. TOON is the default;
+func ctxWithFormat(ctx context.Context, format string) context.Context {
+	return context.WithValue(ctx, formatKey{}, format)
+}
+
+func formatFromCtx(ctx context.Context) string {
+	if f, _ := ctx.Value(formatKey{}).(string); f == "json" {
+		return "json"
+	}
+	return "toon"
+}
+
+// renderString serializes v in the call's output format. TOON is the default;
 // on any encoding error it falls back to pretty JSON.
-func renderString(v any) string {
-	if renderFormat == "json" {
+func renderString(ctx context.Context, v any) string {
+	if formatFromCtx(ctx) == "json" {
 		return marshalIndent(v)
 	}
 	s, err := toon.MarshalString(v)
@@ -50,8 +63,8 @@ func renderString(v any) string {
 }
 
 // jsonResult renders structured data as a text tool result.
-func jsonResult(v any) toolResult {
-	return textResult(renderString(v))
+func jsonResult(ctx context.Context, v any) toolResult {
+	return textResult(renderString(ctx, v))
 }
 
 // marshalIndent pretty-prints JSON with 2-space indent and without HTML
@@ -381,7 +394,7 @@ type apiResponse struct {
 	status     int
 }
 
-func (c *SentryClient) request(method, path string, params map[string]any, body any) (apiResponse, error) {
+func (c *SentryClient) request(ctx context.Context, method, path string, params map[string]any, body any) (apiResponse, error) {
 	cleanPath := path
 	if !strings.HasPrefix(cleanPath, "/") {
 		cleanPath = "/" + cleanPath
@@ -410,7 +423,6 @@ func (c *SentryClient) request(method, path string, params map[string]any, body 
 		reqBody = bytes.NewReader(b)
 	}
 
-	ctx := callCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -522,9 +534,9 @@ func (i *identity) ident() string {
 	return ""
 }
 
-func (c *SentryClient) whoami() *identity {
+func (c *SentryClient) whoami(ctx context.Context) *identity {
 	// /auth/ works for both user PATs and org auth tokens; /users/me/ rejects org tokens.
-	resp, err := c.request("GET", "/auth/", nil, nil)
+	resp, err := c.request(ctx, "GET", "/auth/", nil, nil)
 	if err != nil {
 		return nil
 	}
@@ -544,8 +556,8 @@ type projectInfo struct {
 	slug, name, platform string
 }
 
-func (c *SentryClient) fetchProjects(limit int) []projectInfo {
-	resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/projects/", map[string]any{
+func (c *SentryClient) fetchProjects(ctx context.Context, limit int) []projectInfo {
+	resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/projects/", map[string]any{
 		"per_page": clampLimit(limit, 100),
 	}, nil)
 	if err != nil {
@@ -563,12 +575,12 @@ func (c *SentryClient) fetchProjects(limit int) []projectInfo {
 	return out
 }
 
-func (c *SentryClient) listProjects(limit int, cursor string) (toolResult, error) {
+func (c *SentryClient) listProjects(ctx context.Context, limit int, cursor string) (toolResult, error) {
 	params := map[string]any{"per_page": clampLimit(limit, 100)}
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/projects/", params, nil)
+	resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/projects/", params, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -591,12 +603,12 @@ func (c *SentryClient) listProjects(limit int, cursor string) (toolResult, error
 	return textResult(strings.Join(lines, "\n")), nil
 }
 
-func (c *SentryClient) listTeams(limit int, cursor string) (toolResult, error) {
+func (c *SentryClient) listTeams(ctx context.Context, limit int, cursor string) (toolResult, error) {
 	params := map[string]any{"per_page": clampLimit(limit, 100)}
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/teams/", params, nil)
+	resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/teams/", params, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -606,12 +618,12 @@ func (c *SentryClient) listTeams(limit int, cursor string) (toolResult, error) {
 	}
 	next := c.parseNextCursor(resp.linkHeader)
 	if next == "" {
-		return jsonResult(arr), nil
+		return jsonResult(ctx, arr), nil
 	}
-	return jsonResult(map[string]any{"teams": arr, "next_cursor": next}), nil
+	return jsonResult(ctx, map[string]any{"teams": arr, "next_cursor": next}), nil
 }
 
-func (c *SentryClient) listUsers(query string, limit int, cursor string) (toolResult, error) {
+func (c *SentryClient) listUsers(ctx context.Context, query string, limit int, cursor string) (toolResult, error) {
 	params := map[string]any{"per_page": clampLimit(limit, 25)}
 	if query != "" {
 		params["query"] = query
@@ -619,7 +631,7 @@ func (c *SentryClient) listUsers(query string, limit int, cursor string) (toolRe
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/members/", params, nil)
+	resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/members/", params, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -652,11 +664,11 @@ func (c *SentryClient) listUsers(query string, limit int, cursor string) (toolRe
 	if next := c.parseNextCursor(resp.linkHeader); next != "" {
 		payload["next_cursor"] = next
 	}
-	return jsonResult(payload), nil
+	return jsonResult(ctx, payload), nil
 }
 
-func (c *SentryClient) getDevContext() (toolResult, error) {
-	me := c.whoami()
+func (c *SentryClient) getDevContext(ctx context.Context, req *mcp.CallToolRequest) (toolResult, error) {
+	me := c.whoami(ctx)
 	var lines []string
 	lines = append(lines, "Sentry instance: "+c.baseURL)
 	lines = append(lines, "Organization:    "+c.OrgSlug)
@@ -677,7 +689,7 @@ func (c *SentryClient) getDevContext() (toolResult, error) {
 	// Workspace roots handed to the server by the MCP client (roots/list or a
 	// proxy-set header). These are the repo/working-tree a shell-calling tool
 	// would operate in.
-	if roots := activePeer.listRoots(); len(roots) > 0 {
+	if roots := resolveRoots(ctx, req); len(roots) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, "Workspace roots (from MCP client):")
 		for _, r := range roots {
@@ -708,7 +720,7 @@ func (c *SentryClient) getDevContext() (toolResult, error) {
 		return out
 	}
 
-	if resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
+	if resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
 		"query": "is:unresolved assigned:me", "limit": 10,
 	}, nil); err == nil {
 		assigned := toArray(resp.data)
@@ -724,7 +736,7 @@ func (c *SentryClient) getDevContext() (toolResult, error) {
 		lines = append(lines, "Could not fetch assigned issues: "+err.Error())
 	}
 
-	if resp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
+	if resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
 		"query": "is:unresolved", "limit": 5, "sort": "new",
 	}, nil); err == nil {
 		recent := toArray(resp.data)
@@ -745,7 +757,7 @@ func (c *SentryClient) getDevContext() (toolResult, error) {
 	return textResult(strings.Join(lines, "\n")), nil
 }
 
-func (c *SentryClient) listIssues(projectSlug, query, status string, limit int, cursor string) (toolResult, error) {
+func (c *SentryClient) listIssues(ctx context.Context, projectSlug, query, status string, limit int, cursor string) (toolResult, error) {
 	params := map[string]any{}
 	q := query
 	if status != "" {
@@ -762,7 +774,7 @@ func (c *SentryClient) listIssues(projectSlug, query, status string, limit int, 
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	resp, err := c.request("GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", params, nil)
+	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", params, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -775,18 +787,18 @@ func (c *SentryClient) listIssues(projectSlug, query, status string, limit int, 
 	if next := c.parseNextCursor(resp.linkHeader); next != "" {
 		payload["next_cursor"] = next
 	}
-	return jsonResult(payload), nil
+	return jsonResult(ctx, payload), nil
 }
 
 // ── Issue read ───────────────────────────────────────────────────────────────
 
-func (c *SentryClient) getIssue(issueIdOrUrl string, includeLatestEvent bool, includeFields, excludeFields []string, grepPattern string, maxStackFrames *int) (toolResult, error) {
+func (c *SentryClient) getIssue(ctx context.Context, issueIdOrUrl string, includeLatestEvent bool, includeFields, excludeFields []string, grepPattern string, maxStackFrames *int) (toolResult, error) {
 	issueId := extractIssueId(issueIdOrUrl)
 	if issueId == "" {
 		return toolResult{}, fmt.Errorf("Could not extract issue ID from %q. Pass a numeric ID or full issue URL.", issueIdOrUrl)
 	}
 
-	resp, err := c.request("GET", "/issues/"+issueId+"/", nil, nil)
+	resp, err := c.request(ctx, "GET", "/issues/"+issueId+"/", nil, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -794,7 +806,7 @@ func (c *SentryClient) getIssue(issueIdOrUrl string, includeLatestEvent bool, in
 	combined["latest_event"] = nil
 
 	if includeLatestEvent {
-		evResp, err := c.request("GET", "/organizations/"+c.OrgSlug+"/issues/"+issueId+"/events/latest/", nil, nil)
+		evResp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/"+issueId+"/events/latest/", nil, nil)
 		if err != nil {
 			combined["latest_event"] = map[string]any{"_error": err.Error()}
 		} else {
@@ -831,11 +843,11 @@ func (c *SentryClient) getIssue(issueIdOrUrl string, includeLatestEvent bool, in
 		}
 		out = filtered
 	}
-	return jsonResult(out), nil
+	return jsonResult(ctx, out), nil
 }
 
-func (c *SentryClient) getEvent(projectSlug, eventId string, limit, offset int, entryType string) (toolResult, error) {
-	resp, err := c.request("GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
+func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId string, limit, offset int, entryType string) (toolResult, error) {
+	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -917,7 +929,7 @@ func (c *SentryClient) getEvent(projectSlug, eventId string, limit, offset int, 
 			"tip":             tip,
 		}
 	}
-	return jsonResult(out), nil
+	return jsonResult(ctx, out), nil
 }
 
 func sliceRange(arr []any, offset, limit int) []any {
@@ -942,8 +954,8 @@ func contains(arr []string, s string) bool {
 
 // ── Issue mutation ───────────────────────────────────────────────────────────
 
-func (c *SentryClient) updateIssueStatus(issueId, status string) (string, error) {
-	resp, err := c.request("PUT", "/issues/"+issueId+"/", nil, map[string]any{"status": status})
+func (c *SentryClient) updateIssueStatus(ctx context.Context, issueId, status string) (string, error) {
+	resp, err := c.request(ctx, "PUT", "/issues/"+issueId+"/", nil, map[string]any{"status": status})
 	if err != nil {
 		return "", err
 	}
@@ -951,8 +963,8 @@ func (c *SentryClient) updateIssueStatus(issueId, status string) (string, error)
 }
 
 // assignIssue assigns the issue. assignedTo == "" unassigns.
-func (c *SentryClient) assignIssue(issueId, assignedTo string) (string, error) {
-	resp, err := c.request("PUT", "/issues/"+issueId+"/", nil, map[string]any{"assignedTo": assignedTo})
+func (c *SentryClient) assignIssue(ctx context.Context, issueId, assignedTo string) (string, error) {
+	resp, err := c.request(ctx, "PUT", "/issues/"+issueId+"/", nil, map[string]any{"assignedTo": assignedTo})
 	if err != nil {
 		return "", err
 	}
@@ -970,24 +982,24 @@ func (c *SentryClient) assignIssue(issueId, assignedTo string) (string, error) {
 
 // mutateIssue applies status/assignee/comment in one call. statusSet/assignSet
 // indicate whether the respective field was provided.
-func (c *SentryClient) mutateIssue(issueId, status string, statusSet bool, assignedTo string, assignSet bool, comment string) (toolResult, error) {
+func (c *SentryClient) mutateIssue(ctx context.Context, issueId, status string, statusSet bool, assignedTo string, assignSet bool, comment string) (toolResult, error) {
 	var lines []string
 	if statusSet {
-		r, err := c.updateIssueStatus(issueId, status)
+		r, err := c.updateIssueStatus(ctx, issueId, status)
 		if err != nil {
 			return toolResult{}, err
 		}
 		lines = append(lines, r)
 	}
 	if assignSet {
-		r, err := c.assignIssue(issueId, assignedTo)
+		r, err := c.assignIssue(ctx, issueId, assignedTo)
 		if err != nil {
 			return toolResult{}, err
 		}
 		lines = append(lines, r)
 	}
 	if strings.TrimSpace(comment) != "" {
-		r, err := c.addComment(issueId, comment)
+		r, err := c.addComment(ctx, issueId, comment)
 		if err != nil {
 			return toolResult{}, err
 		}
@@ -1001,32 +1013,32 @@ func (c *SentryClient) mutateIssue(issueId, status string, statusSet bool, assig
 
 // ── Comments ─────────────────────────────────────────────────────────────────
 
-func (c *SentryClient) addComment(issueId, body string) (string, error) {
+func (c *SentryClient) addComment(ctx context.Context, issueId, body string) (string, error) {
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
 		return "", fmt.Errorf("Comment body must not be empty.")
 	}
-	resp, err := c.request("POST", "/issues/"+issueId+"/comments/", nil, map[string]any{"text": trimmed})
+	resp, err := c.request(ctx, "POST", "/issues/"+issueId+"/comments/", nil, map[string]any{"text": trimmed})
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Added comment %v on issue %s.", toObject(resp.data)["id"], issueId), nil
 }
 
-func (c *SentryClient) editComment(issueId, commentId, body string) (toolResult, error) {
+func (c *SentryClient) editComment(ctx context.Context, issueId, commentId, body string) (toolResult, error) {
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
 		return toolResult{}, fmt.Errorf("Comment body must not be empty.")
 	}
-	resp, err := c.request("PUT", "/issues/"+issueId+"/comments/"+commentId+"/", nil, map[string]any{"text": trimmed})
+	resp, err := c.request(ctx, "PUT", "/issues/"+issueId+"/comments/"+commentId+"/", nil, map[string]any{"text": trimmed})
 	if err != nil {
 		return toolResult{}, err
 	}
 	return textResult(fmt.Sprintf("Updated comment %v on issue %s.", toObject(resp.data)["id"], issueId)), nil
 }
 
-func (c *SentryClient) deleteComment(issueId, commentId string) (toolResult, error) {
-	if _, err := c.request("DELETE", "/issues/"+issueId+"/comments/"+commentId+"/", nil, nil); err != nil {
+func (c *SentryClient) deleteComment(ctx context.Context, issueId, commentId string) (toolResult, error) {
+	if _, err := c.request(ctx, "DELETE", "/issues/"+issueId+"/comments/"+commentId+"/", nil, nil); err != nil {
 		return toolResult{}, err
 	}
 	return textResult(fmt.Sprintf("Deleted comment %s on issue %s.", commentId, issueId)), nil
@@ -1034,8 +1046,8 @@ func (c *SentryClient) deleteComment(issueId, commentId string) (toolResult, err
 
 // ── Specialized debug tools ──────────────────────────────────────────────────
 
-func (c *SentryClient) getStackFrames(projectSlug, eventId string, inAppOnly bool, maxFrames int) (toolResult, error) {
-	resp, err := c.request("GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
+func (c *SentryClient) getStackFrames(ctx context.Context, projectSlug, eventId string, inAppOnly bool, maxFrames int) (toolResult, error) {
+	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -1091,7 +1103,7 @@ func (c *SentryClient) getStackFrames(projectSlug, eventId string, inAppOnly boo
 	if limited == nil {
 		limited = []any{}
 	}
-	return jsonResult(map[string]any{
+	return jsonResult(ctx, map[string]any{
 		"eventId":        eventId,
 		"totalFrames":    len(frames),
 		"returnedFrames": len(limited),
@@ -1100,16 +1112,16 @@ func (c *SentryClient) getStackFrames(projectSlug, eventId string, inAppOnly boo
 	}), nil
 }
 
-func (c *SentryClient) checkDsymStatus(projectSlug, eventId string) (toolResult, error) {
+func (c *SentryClient) checkDsymStatus(ctx context.Context, projectSlug, eventId string) (toolResult, error) {
 	var ev map[string]any
 	if eventId != "" {
-		resp, err := c.request("GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
+		resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
 		if err != nil {
 			return toolResult{}, err
 		}
 		ev = toObject(resp.data)
 	} else {
-		resp, err := c.request("GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", map[string]any{"limit": 1}, nil)
+		resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", map[string]any{"limit": 1}, nil)
 		if err != nil {
 			return toolResult{}, err
 		}
@@ -1118,7 +1130,7 @@ func (c *SentryClient) checkDsymStatus(projectSlug, eventId string) (toolResult,
 			return textResult("No recent issues found in project. Cannot check dSYM status."), nil
 		}
 		issueId := toObject(issues[0])["id"]
-		evResp, err := c.request("GET", fmt.Sprintf("/organizations/%s/issues/%v/events/latest/", c.OrgSlug, issueId), nil, nil)
+		evResp, err := c.request(ctx, "GET", fmt.Sprintf("/organizations/%s/issues/%v/events/latest/", c.OrgSlug, issueId), nil, nil)
 		if err != nil {
 			return toolResult{}, err
 		}
@@ -1151,7 +1163,7 @@ func (c *SentryClient) checkDsymStatus(projectSlug, eventId string) (toolResult,
 	if eid == nil {
 		eid = eventId
 	}
-	return jsonResult(map[string]any{
+	return jsonResult(ctx, map[string]any{
 		"project":           projectSlug,
 		"eventId":           eid,
 		"hasMissingSymbols": len(missing) > 0,
@@ -1161,7 +1173,7 @@ func (c *SentryClient) checkDsymStatus(projectSlug, eventId string) (toolResult,
 	}), nil
 }
 
-func (c *SentryClient) rawApi(endpoint, method string, params map[string]any, body any, grepPattern string, maxChars, charOffset int) (toolResult, error) {
+func (c *SentryClient) rawApi(ctx context.Context, endpoint, method string, params map[string]any, body any, grepPattern string, maxChars, charOffset int) (toolResult, error) {
 	method = strings.ToUpper(method)
 	if method == "" {
 		method = "GET"
@@ -1176,7 +1188,7 @@ func (c *SentryClient) rawApi(endpoint, method string, params map[string]any, bo
 		endpoint = "/" + endpoint
 	}
 
-	resp, err := c.request(method, endpoint, params, body)
+	resp, err := c.request(ctx, method, endpoint, params, body)
 	if err != nil {
 		return toolResult{}, err
 	}
@@ -1188,7 +1200,7 @@ func (c *SentryClient) rawApi(endpoint, method string, params map[string]any, bo
 			return toolResult{}, err
 		}
 	}
-	jsonStr := renderString(filtered)
+	jsonStr := renderString(ctx, filtered)
 
 	// Explicit paging takes precedence over the token-size warning. Slice on
 	// runes, not bytes, so multibyte UTF-8 (common in Sentry payloads) is never

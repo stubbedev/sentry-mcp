@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -141,14 +142,16 @@ func TestNormalizeArgsProjectAlias(t *testing.T) {
 }
 
 func TestRenderStringFormats(t *testing.T) {
-	defaultFormat = "toon"
-	renderFormat = "json"
-	if out := renderString(map[string]any{"a": 1}); out == "" || out[0] != '{' {
+	jsonCtx := ctxWithFormat(context.Background(), "json")
+	if out := renderString(jsonCtx, map[string]any{"a": 1}); out == "" || out[0] != '{' {
 		t.Errorf("json render = %q", out)
 	}
-	renderFormat = "toon"
-	if out := renderString(map[string]any{"a": float64(1)}); out == "" || out[0] == '{' {
+	toonCtx := ctxWithFormat(context.Background(), "toon")
+	if out := renderString(toonCtx, map[string]any{"a": float64(1)}); out == "" || out[0] == '{' {
 		t.Errorf("toon render should not be JSON object: %q", out)
 	}
-	renderFormat = "toon"
+	// No format on the context → defaults to toon, not JSON.
+	if out := renderString(context.Background(), map[string]any{"a": float64(1)}); out == "" || out[0] == '{' {
+		t.Errorf("default render should be toon: %q", out)
+	}
 }

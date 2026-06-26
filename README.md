@@ -429,10 +429,14 @@ To use a specific config file:
 ./sentry-mcp --config /path/to/config.json
 ```
 
+Built on the official [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk),
+which provides the JSON-RPC protocol, the stdio and Streamable HTTP transports,
+and the client roots round-trip.
+
 Layout:
-- `main.go` — transport selection, JSON-RPC stdio loop, protocol, tool dispatch, instructions
-- `http.go` — MCP Streamable HTTP transport: sessions, SSE stream, header roots (`--http`)
-- `peer.go` — client connection (server→client requests), pending-request registry, workspace roots
+- `main.go` — server setup, transport selection, tool registration + dispatch, instructions
+- `http.go` — Streamable HTTP transport wiring (SDK handler, sessions, `--http`)
+- `roots.go` — workspace roots: header-pinned (proxy) or fetched via the client `roots/list`
 - `sentry.go` — Sentry API client, tool handlers, TOON/JSON rendering, helpers
 - `config.go` — config resolution (`--config` / env / file / XDG)
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`

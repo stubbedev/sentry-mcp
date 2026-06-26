@@ -18,7 +18,7 @@
     "postinstall": "node scripts/postinstall.mjs",
     "build": "go build -o sentry-mcp .",
     "test": "go test ./...",
-    "smoke": "go build -o sentry-mcp . && printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}' | SENTRY_URL=https://smoke.invalid SENTRY_AUTH_TOKEN=smoke SENTRY_ORG_SLUG=smoke ./sentry-mcp | node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const r=JSON.parse(d.trim());if(r.error)throw new Error('server error: '+r.error.message);const t=r.result?.tools;if(!Array.isArray(t)||!t.length)throw new Error('no tools in response');const bad=t.filter(x=>!x.name||!x.inputSchema);if(bad.length)throw new Error('malformed tools: '+bad.map(x=>x.name??'(unnamed)').join(', '));console.log('smoke OK — '+t.length+' tool(s): '+t.map(x=>x.name).join(', '))}catch(e){console.error('smoke FAIL:',e.message);process.exit(1)}})\"",
+    "smoke": "go build -o sentry-mcp . && node scripts/smoke.mjs",
     "preversion": "go vet ./... && npm run test && npm run smoke",
     "release:patch": "npm version patch && git push origin HEAD --follow-tags",
     "release:minor": "npm version minor && git push origin HEAD --follow-tags",
