@@ -41,7 +41,10 @@ func rootFromString(s string) (mcpRoot, bool) {
 // rootHeaders are the request headers a proxy/harness may set to hand the
 // server the workspace root(s) without the MCP roots round-trip. Values are
 // file:// URIs or plain paths; multiple roots may be comma-separated.
-var rootHeaders = []string{"X-Mcp-Roots", "X-Mcp-Root", "Mcp-Roots", "Mcp-Root"}
+// X-Repo-Root leads: it is the name the rest of this fleet reads and the one
+// the Claude Code entries send, and headers are the only workspace signal that
+// survives MCP 2026-07-28 (see resolveRoots).
+var rootHeaders = []string{"X-Repo-Root", "X-Mcp-Roots", "X-Mcp-Root", "Mcp-Roots", "Mcp-Root"}
 
 // parseRootHeaders collects roots from the recognized request headers.
 func parseRootHeaders(h http.Header) []mcpRoot {
@@ -70,7 +73,9 @@ func resolveRoots(ctx context.Context, req *mcp.CallToolRequest) []mcpRoot {
 			return roots
 		}
 	}
-	if req.Session == nil {
+	// Only ask when the client both advertised roots and negotiated a protocol
+	// version where a server may still ask (see rootsRemovedFrom).
+	if !rootsUsable(req.Session) {
 		return nil
 	}
 	res, err := req.Session.ListRoots(ctx, &mcp.ListRootsParams{})
@@ -82,4 +87,29 @@ func resolveRoots(ctx context.Context, req *mcp.CallToolRequest) []mcpRoot {
 		out = append(out, mcpRoot{URI: r.URI, Name: r.Name})
 	}
 	return out
+}
+
+// rootsRemovedFrom is the first protocol revision that forbids server-initiated
+// JSON-RPC requests (SEP-2322 / SEP-2575): from there on roots/list is not
+// something a server can ask for. Clients on that revision pin the workspace
+// with one of the rootHeaders instead. ISO dates compare correctly as strings.
+const rootsRemovedFrom = "2026-07-28"
+
+// rootsUsable reports whether this session may still be asked for its roots:
+// the client advertised the capability, on a protocol version that still allows
+// the question.
+func rootsUsable(ss *mcp.ServerSession) bool {
+	if ss == nil {
+		return false
+	}
+	return rootsAllowed(ss.InitializeParams())
+}
+
+// rootsAllowed is rootsUsable's decision, split out so it can be tested without
+// a live session.
+func rootsAllowed(ip *mcp.InitializeParams) bool {
+	if ip == nil || ip.Capabilities == nil || ip.ProtocolVersion >= rootsRemovedFrom {
+		return false
+	}
+	return ip.Capabilities.RootsV2 != nil
 }
