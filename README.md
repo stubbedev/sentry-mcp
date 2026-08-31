@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**, written in Go. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
 
-Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it four interchangeable ways — `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses default to compact [TOON](#output-format-toon) to save tokens.
+Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it five interchangeable ways — a one-click Claude Desktop bundle, `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses default to compact [TOON](#output-format-toon) to save tokens.
 
 > **Note:** This server targets self-hosted Sentry installs. It will also work against sentry.io, but the official Sentry MCP is a better fit there.
 
@@ -79,7 +79,7 @@ SENTRY_AUTH_TOKEN=your-sentry-auth-token
 SENTRY_ORG_SLUG=your-org-slug
 ```
 
-Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONFIG` env var → `~/.sentry-mcp.json` → `$XDG_CONFIG_HOME/sentry-mcp/config.json` (defaults to `~/.config/sentry-mcp/config.json`) → `.sentry-mcp.json` in cwd → environment variables.
+Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONFIG` env var → `~/.sentry-mcp.json` → `$XDG_CONFIG_HOME/sentry-mcp/config.json` (defaults to `~/.config/sentry-mcp/config.json`) → `.sentry-mcp.json` in cwd → environment variables. A leading `~` in `--config` / `SENTRY_MCP_CONFIG` is expanded by the server, so it also works when a GUI client launches it without a shell.
 
 ### 2. Connect to your AI tool
 
@@ -87,6 +87,7 @@ Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONF
 
 | Method | Best for | Trade-off |
 |---|---|---|
+| **`.mcpb` bundle** | [Claude Desktop](#claude-desktop) — double-click install, credentials entered in a dialog | Claude Desktop only; update by installing the next release's bundle |
 | **`go install` / prebuilt binary / Nix** | Lowest overhead — the MCP client execs the native binary directly, **no Node process** | You manage updates (re-run `go install`, or `nix run` re-resolves on each launch) |
 | **`npx @latest`** | Easiest, zero install, always the newest version | Auto-downloads the matching binary, but leaves one small idle Node process for the session (zero per-call latency — stdio is inherited) |
 
@@ -101,6 +102,53 @@ Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONF
 ```bash
 claude mcp add sentry -- npx -y @stubbedev/sentry-mcp@latest --config ~/.sentry-mcp.json
 ```
+
+---
+
+#### Claude Desktop
+
+**One-click (recommended).** Grab the `.mcpb` bundle for your platform from the
+[latest release](https://github.com/stubbedev/sentry-mcp/releases/latest) —
+`sentry-mcp_darwin_arm64.mcpb` (Apple Silicon), `sentry-mcp_darwin_amd64.mcpb` (Intel Mac),
+`sentry-mcp_windows_amd64.mcpb` — then **double-click it**, drag it onto the Claude Desktop
+window, or use **Settings → Extensions → Advanced settings → Install Extension…**. The
+install dialog asks for the Sentry URL, auth token and org slug; the token is stored by
+Claude Desktop rather than in a file. Leaving the fields blank reuses an existing
+`~/.sentry-mcp.json`.
+
+The bundle carries the binary, so there is no Node, no `npx`, no `PATH` to fix and no JSON
+to edit. [MCP Bundles](https://github.com/modelcontextprotocol/mcpb) are a Claude Desktop
+feature today; other clients use the config files below.
+
+**Manual config.** Claude Desktop is a GUI app: it launches the server with a minimal
+`PATH`, no shell, and `/` as the working directory. So `command` must be an **absolute
+path** (a bare `npx` fails with `spawn npx ENOENT`), and a `.env` file or a relative
+`--config` path never resolves — pass credentials as `env` instead:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "sentry": {
+      "command": "/absolute/path/to/sentry-mcp",
+      "env": {
+        "SENTRY_URL": "https://sentry.example.com",
+        "SENTRY_AUTH_TOKEN": "your-sentry-auth-token",
+        "SENTRY_ORG_SLUG": "your-org-slug"
+      }
+    }
+  }
+}
+```
+
+To keep `npx`, set `command` to the absolute path of your launcher (`which npx`, e.g.
+`/opt/homebrew/bin/npx`) with `"args": ["-y", "@stubbedev/sentry-mcp@latest"]`.
+
+Server stderr is logged to `~/Library/Logs/Claude/mcp-server-sentry.log` (macOS) or
+`%APPDATA%\Claude\logs\mcp-server-sentry.log` (Windows) — read that first when a
+connection fails.
 
 ---
 
@@ -173,22 +221,49 @@ Add to `opencode.json` in your project root (or `~/.config/opencode/opencode.jso
 }
 ```
 
+`environment` accepts the `SENTRY_*` variables if you would rather not keep a config file.
+Set `"type": "remote"` with `"url"` and `"headers"` to point at a shared
+[HTTP server](#http-transport-behind-a-proxy) instead.
+
 ---
 
-#### Codex CLI
+#### Codex (CLI, IDE extension, app)
 
-Add to `~/.codex/config.yaml`:
+One command — it writes the config all three read:
 
-```yaml
-mcpServers:
-  sentry:
-    command: npx
-    args:
-      - -y
-      - @stubbedev/sentry-mcp@latest
-      - --config
-      - /home/you/.sentry-mcp.json
+```bash
+codex mcp add sentry -- npx -y @stubbedev/sentry-mcp@latest
 ```
+
+Or edit `~/.codex/config.toml` directly (`.codex/config.toml` in a trusted project for a
+project-scoped server). Note the TOML table name is `mcp_servers`, with an underscore:
+
+```toml
+[mcp_servers.sentry]
+command = "npx"
+args = ["-y", "@stubbedev/sentry-mcp@latest", "--config", "/home/you/.sentry-mcp.json"]
+
+# Optional — instead of a config file:
+[mcp_servers.sentry.env]
+SENTRY_URL = "https://sentry.example.com"
+SENTRY_AUTH_TOKEN = "…"
+SENTRY_ORG_SLUG = "your-org-slug"
+```
+
+Codex picks the transport from the keys present: `command` means stdio, `url` means
+streamable HTTP — so a shared [HTTP server](#http-transport-behind-a-proxy) is
+`url = "http://127.0.0.1:8765/mcp"` instead of `command`.
+
+---
+
+#### VS Code / GitHub Copilot
+
+```bash
+code --add-mcp '{"name":"sentry","command":"npx","args":["-y","@stubbedev/sentry-mcp@latest"]}'
+```
+
+Or commit `.vscode/mcp.json` with a `servers` object of the same shape to share it with the
+repo.
 
 ---
 
@@ -239,7 +314,57 @@ The package `version` is read from `package.json` (so it follows releases), and 
 
 #### Any other MCP-compatible tool
 
-Most tools that support MCP accept the same JSON format. Use `npx` as the command with `["-y", "@stubbedev/sentry-mcp@latest", "--config", "/path/to/config.json"]` as the args — or the `sentry-mcp` binary directly.
+Most clients accept the Claude Desktop shape — an `mcpServers` object keyed by name, with
+`command`, `args` and `env`:
+
+```json
+{
+  "mcpServers": {
+    "sentry": {
+      "command": "npx",
+      "args": ["-y", "@stubbedev/sentry-mcp@latest"],
+      "env": {
+        "SENTRY_URL": "https://sentry.example.com",
+        "SENTRY_AUTH_TOKEN": "…",
+        "SENTRY_ORG_SLUG": "your-org-slug"
+      }
+    }
+  }
+}
+```
+
+LM Studio uses exactly that shape in its own `mcp.json` (edit it from the app's plugin
+panel); Cherry Studio, Witsy, Jan and 5ire have in-app MCP dialogs with the same fields.
+
+Goose is the exception — its `~/.config/goose/config.yaml` uses `extensions:` with `cmd`
+rather than `command`:
+
+```yaml
+extensions:
+  sentry:
+    enabled: true
+    type: stdio
+    cmd: npx
+    args: ["-y", "@stubbedev/sentry-mcp@latest"]
+    envs:
+      SENTRY_URL: https://sentry.example.com
+      SENTRY_AUTH_TOKEN: "…"
+      SENTRY_ORG_SLUG: your-org-slug
+```
+
+Every GUI client brings the caveats from the [Claude Desktop](#claude-desktop) section:
+absolute `command` path, minimal `PATH`, no usable cwd — so pass credentials as `env` (or
+an absolute `--config` path) rather than relying on a `.env` file.
+
+---
+
+#### ChatGPT (desktop / web) — not supported
+
+ChatGPT connectors accept **remote HTTPS MCP servers only** (streamable HTTP or SSE, with
+OAuth or no auth); it cannot spawn a local stdio server. This server's `--http` mode speaks
+the right protocol, but making it work would mean exposing an endpoint that reaches your
+self-hosted Sentry to OpenAI's servers, with no place in the connector UI for
+authentication this server would recognise. Use a client from the list above.
 
 ### HTTP transport (behind a proxy)
 
@@ -363,7 +488,9 @@ Sentry events can blow past LLM context limits — a single event with a long st
 
 ## Releases (Maintainers)
 
-Each release ships **both** prebuilt Go binaries (attached to the GitHub release) and the npm wrapper `@stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — attaches them to the GitHub release, then publishes the npm package.
+Each release ships **both** prebuilt Go binaries (attached to the GitHub release) and the npm wrapper `@stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — packs six of them into `.mcpb` bundles for one-click Claude Desktop install (darwin/windows/linux × amd64/arm64), attaches everything to the GitHub release, then publishes the npm package.
+
+Bundle sources live in `packaging/mcpb/` (`manifest.template.json`, `icon.png`, `pack.sh`). CI packs and validates one bundle on every run, so a manifest typo fails on the PR. `npm run bundle` builds one for the host platform into `dist/`.
 
 Use semantic versioning. Breaking tool-surface changes should bump the minor version while `<1.0.0` (for example `0.0.x` -> `0.1.0`).
 

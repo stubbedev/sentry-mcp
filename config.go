@@ -40,22 +40,39 @@ func readJSONFile(path string) *configFile {
 	return &cf
 }
 
+// expandHome expands a leading ~ in a path. GUI-launched MCP clients (Claude
+// Desktop, Cursor, …) spawn the server without a shell, so a configured
+// "--config ~/.sentry-mcp.json" arrives with the tilde unexpanded.
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
+}
+
 // getConfigPath resolves the config file location in priority order:
 // --config <path> CLI arg → SENTRY_MCP_CONFIG → ~/.sentry-mcp.json → ./.sentry-mcp.json
 func getConfigPath() string {
 	args := os.Args[1:]
 	for i, a := range args {
 		if a == "--config" && i+1 < len(args) {
-			p, _ := filepath.Abs(args[i+1])
+			p, _ := filepath.Abs(expandHome(args[i+1]))
 			return p
 		}
 		if strings.HasPrefix(a, "--config=") {
-			p, _ := filepath.Abs(strings.TrimPrefix(a, "--config="))
+			p, _ := filepath.Abs(expandHome(strings.TrimPrefix(a, "--config=")))
 			return p
 		}
 	}
 	if env := os.Getenv("SENTRY_MCP_CONFIG"); env != "" {
-		p, _ := filepath.Abs(env)
+		p, _ := filepath.Abs(expandHome(env))
 		return p
 	}
 	if home, err := os.UserHomeDir(); err == nil {

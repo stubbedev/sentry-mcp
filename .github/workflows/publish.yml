@@ -65,10 +65,22 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+
+      - name: Pack .mcpb bundles (one-click Claude Desktop install)
+        run: |
+          for t in darwin_amd64:darwin windows_amd64:win32 linux_amd64:linux \
+                   darwin_arm64:darwin windows_arm64:win32 linux_arm64:linux; do
+            arch="${t%%:*}"; platform="${t##*:}"
+            bin="dist/sentry-mcp_${arch}"
+            [ "$platform" = win32 ] && bin="${bin}.exe"
+            packaging/mcpb/pack.sh "$bin" "$platform" "dist/sentry-mcp_${arch}.mcpb"
+          done
 
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@v3

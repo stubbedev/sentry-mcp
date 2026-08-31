@@ -51,3 +51,35 @@ func TestGetConfigPathXDG(t *testing.T) {
 		t.Errorf("legacy home dotfile should win = %q, want %q", got, legacy)
 	}
 }
+
+// A GUI-launched client (Claude Desktop) spawns the server without a shell, so
+// "~/..." in --config / SENTRY_MCP_CONFIG reaches us unexpanded.
+func TestGetConfigPathTilde(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	want := filepath.Join(tmp, ".sentry-mcp.json")
+
+	if got := expandHome("~"); got != tmp {
+		t.Errorf("expandHome(~) = %q, want %q", got, tmp)
+	}
+	if got := expandHome("/abs/path"); got != "/abs/path" {
+		t.Errorf("expandHome should leave absolute paths alone, got %q", got)
+	}
+
+	t.Setenv("SENTRY_MCP_CONFIG", "~/.sentry-mcp.json")
+	if got := getConfigPath(); got != want {
+		t.Errorf("SENTRY_MCP_CONFIG tilde = %q, want %q", got, want)
+	}
+
+	os.Unsetenv("SENTRY_MCP_CONFIG")
+	old := os.Args
+	defer func() { os.Args = old }()
+	os.Args = []string{"sentry-mcp", "--config", "~/.sentry-mcp.json"}
+	if got := getConfigPath(); got != want {
+		t.Errorf("--config tilde = %q, want %q", got, want)
+	}
+	os.Args = []string{"sentry-mcp", "--config=~/.sentry-mcp.json"}
+	if got := getConfigPath(); got != want {
+		t.Errorf("--config= tilde = %q, want %q", got, want)
+	}
+}

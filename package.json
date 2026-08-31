@@ -18,6 +18,7 @@
     "postinstall": "node scripts/postinstall.mjs",
     "build": "go build -o sentry-mcp .",
     "test": "go test ./...",
+    "bundle": "go build -o sentry-mcp . && packaging/mcpb/pack.sh ./sentry-mcp $(case $(uname -s) in Darwin) echo darwin;; MINGW*|MSYS*) echo win32;; *) echo linux;; esac) dist/sentry-mcp.mcpb",
     "smoke": "go build -o sentry-mcp . && node scripts/smoke.mjs",
     "preversion": "go vet ./... && npm run test && npm run smoke",
     "release:patch": "npm version patch && git push origin HEAD --follow-tags",

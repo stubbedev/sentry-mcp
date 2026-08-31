@@ -1,0 +1,53 @@
+{
+  "manifest_version": "0.3",
+  "name": "sentry-mcp",
+  "display_name": "Self-hosted Sentry",
+  "version": "__VERSION__",
+  "description": "Triage Sentry issues, read events and stack traces, and manage assignments — for self-hosted Sentry.",
+  "long_description": "Exposes a self-hosted Sentry instance as MCP tools: search and read issues, pull events and stack traces, check for missing debug symbols, resolve/ignore/assign, and comment. Responses default to compact TOON to save tokens.\n\nFill in your Sentry URL, auth token and organisation slug below, or leave them blank to reuse an existing ~/.sentry-mcp.json. The token needs at least org:read, project:read and event:read — add project:write and event:admin for the mutation tools.",
+  "author": { "name": "stubbedev", "url": "https://github.com/stubbedev" },
+  "icon": "icon.png",
+  "homepage": "https://github.com/stubbedev/sentry-mcp",
+  "documentation": "https://github.com/stubbedev/sentry-mcp#readme",
+  "support": "https://github.com/stubbedev/sentry-mcp/issues",
+  "repository": { "type": "git", "url": "https://github.com/stubbedev/sentry-mcp" },
+  "license": "MIT",
+  "keywords": ["sentry", "errors", "issues", "observability", "self-hosted"],
+  "server": {
+    "type": "binary",
+    "entry_point": "__BIN__",
+    "mcp_config": {
+      "command": "${__dirname}/__BIN__",
+      "args": [],
+      "env": {
+        "SENTRY_URL": "${user_config.sentry_url}",
+        "SENTRY_AUTH_TOKEN": "${user_config.sentry_token}",
+        "SENTRY_ORG_SLUG": "${user_config.sentry_org}"
+      }
+    }
+  },
+  "user_config": {
+    "sentry_url": {
+      "type": "string",
+      "title": "Sentry URL",
+      "description": "e.g. https://sentry.example.com — self-hosted. Blank reuses ~/.sentry-mcp.json.",
+      "required": false
+    },
+    "sentry_token": {
+      "type": "string",
+      "title": "Sentry auth token",
+      "description": "Settings → Account → API → Auth Tokens. Scopes: org:read, project:read, event:read (+ project:write, event:admin to mutate).",
+      "sensitive": true,
+      "required": false
+    },
+    "sentry_org": {
+      "type": "string",
+      "title": "Organisation slug",
+      "description": "The org part of your Sentry URLs, e.g. \"acme\" in /organizations/acme/issues/.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["__PLATFORM__"]
+  }
+}

@@ -25,6 +25,14 @@ jobs:
       - name: Build
         run: go build -o sentry-mcp .
 
+      - name: Bundle — pack + validate .mcpb
+        run: |
+          # Catches a manifest template typo on PR instead of on tag day.
+          packaging/mcpb/pack.sh ./sentry-mcp linux dist/sentry-mcp_linux_amd64.mcpb
+          unzip -o -q dist/sentry-mcp_linux_amd64.mcpb -d dist/bundle
+          test -f dist/bundle/icon.png
+          npx -y @anthropic-ai/mcpb validate dist/bundle/manifest.json
+
       - name: Smoke — tools/list
         run: |
           # The official MCP SDK requires the initialize handshake before any
