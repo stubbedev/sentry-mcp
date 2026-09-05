@@ -22,6 +22,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # Substitute from the self-hosted xilo cache. This must be set at
+          # install time: the `xilo use` step later in the job rewrites nix.conf
+          # only after the build has already run, so the cache was previously
+          # written to but never read from.
+          extra-conf: |
+            extra-substituters = https://nix.stubbe.dev/c/default/default
+            extra-trusted-public-keys = default:6uWvXutL9cXjV3lii+Ur5ff+ArQoG4kMBKNXWrIxhHg=
 
       # Recompute the Go module vendorHash from go.mod/go.sum. Setting it to a
       # fake value makes `nix build` fail and report the correct one, which we
@@ -55,8 +63,8 @@ jobs:
 
       - name: Push to xilo cache
         if: env.XILO_TOKEN != '' && github.event_name != 'pull_request'
-        # Best-effort: a cache-push failure must not redden the workflow.
-        continue-on-error: true
+        # A failed push is not swallowed: it would leave every consumer
+        # rebuilding from source, so the step fails the job.
         run: xilo push default "$(nix build .#default --no-link --print-out-paths)"
 
       - name: Commit updated vendorHash
