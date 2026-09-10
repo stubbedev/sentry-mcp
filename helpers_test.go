@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,35 +67,52 @@ func TestFilterFieldsExclude(t *testing.T) {
 	}
 }
 
-func TestTruncateStackFrames(t *testing.T) {
-	data := parseJSON(t, `{"entries":[{"type":"exception","data":{"values":[{"stacktrace":{"frames":[1,2,3,4,5]}}]}}]}`)
-	out := truncateStackFrames(data, 2).(map[string]any)
-	st := out["entries"].([]any)[0].(map[string]any)["data"].(map[string]any)["values"].([]any)[0].(map[string]any)["stacktrace"].(map[string]any)
-	frames := st["frames"].([]any)
-	if len(frames) != 2 {
-		t.Fatalf("frames len = %d, want 2", len(frames))
+func TestGrepRendered(t *testing.T) {
+	ctx := ctxWithFormat(context.Background(), "toon")
+	rows := []map[string]any{
+		{"function": "doThing", "filename": "a.go", "lineNo": float64(1)},
+		{"function": "other", "filename": "b.go", "lineNo": float64(2)},
+		{"function": "doThing", "filename": "c.go", "lineNo": float64(3)},
 	}
-	if !reflect.DeepEqual(frames, []any{float64(4), float64(5)}) {
-		t.Errorf("kept frames = %#v, want last 2", frames)
-	}
-	if st["frames_omitted"] != 3 {
-		t.Errorf("frames_omitted = %v, want 3", st["frames_omitted"])
-	}
-}
+	data := compactTable("frames", rows, nil)
 
-func TestGrepFilter(t *testing.T) {
-	data := parseJSON(t, `{"function":"doThing","filename":"a.go","other":"nope"}`)
-	out, err := grepFilter(data, "function")
+	out, err := grepRendered(ctx, data, "doThing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Either re-parses to JSON or wraps in grep_results; both must mention the match.
-	s, _ := json.Marshal(out)
-	if !reflect.DeepEqual(out, out) || len(s) == 0 {
-		t.Fatal("empty grep output")
+	// The pattern matches the TOON the caller actually receives. Grepping a
+	// JSON rendering instead meant `"function":` was the only thing that
+	// worked, and it matched nothing visible in the response.
+	if !strings.Contains(out, "doThing") {
+		t.Errorf("match missing from output:\n%s", out)
 	}
-	if _, badErr := grepFilter(data, "(["); badErr == nil {
-		t.Error("expected error on invalid regex")
+	if !strings.Contains(out, "frames[3]{") {
+		t.Errorf("table header must survive, or the matched rows have no column names:\n%s", out)
+	}
+	// Overlapping context windows must not repeat a line.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Count(out, line) > 1 && strings.TrimSpace(line) != "" {
+			t.Errorf("line %q appears more than once:\n%s", line, out)
+		}
+	}
+
+	// A pattern that hits nothing says so, rather than returning an empty
+	// structure the caller has to interpret.
+	empty, err := grepRendered(ctx, data, "nothingmatchesthis")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(empty, "No lines match") {
+		t.Errorf("no-match output = %q", empty)
+	}
+
+	// Matching is case-insensitive, as the schema promises.
+	if out, err := grepRendered(ctx, data, "DOTHING"); err != nil || !strings.Contains(out, "doThing") {
+		t.Errorf("case-insensitive match = %q, %v", out, err)
+	}
+
+	if _, err := grepRendered(ctx, data, "(["); err == nil {
+		t.Error("expected an error on an invalid regex")
 	}
 }
 

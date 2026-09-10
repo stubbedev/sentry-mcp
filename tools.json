@@ -2,6 +2,7 @@
   {
     "name": "sentry_get_dev_context",
     "description": "Master entry point. Use when asked \"what am I working on?\", \"what's the status?\", \"show me the context\", or before any triage task. Returns: configured instance + org, your Sentry identity, unresolved issues assigned to you, and recent unresolved issues across the org with actionable next-step hints.",
+    "annotations": { "title": "Sentry dev context", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {}
@@ -9,65 +10,69 @@
   },
   {
     "name": "sentry_search",
-    "description": "Discover Sentry resources. Use when asked \"list projects\", \"show issues for X\", \"what teams exist\", or \"find user alice\". Set resource:\n• \"issues\" (default) — list issues for a project (pass projectSlug or project); filter with query and/or status\n• \"projects\" — list all projects in the organization\n• \"teams\" — list all teams in the organization\n• \"users\" — find members by name/email (pass query). ALWAYS use this to look up valid usernames before passing to `sentry_mutate_issue assignedTo` — guessing from email prefixes or git authors silently breaks assignment.",
+    "description": "Discover Sentry resources. Use when asked \"list projects\", \"show issues for X\", \"what teams exist\", or \"find user alice\". Set resource:\n• \"issues\" (default) — list issues; pass projectSlug for one project, or omit it to search the whole organization. Filter with query and/or status\n• \"projects\" — list all projects in the organization\n• \"teams\" — list all teams in the organization\n• \"users\" — find members by name/email (pass query). Useful for confirming who exists; `sentry_mutate_issue assignedTo` resolves emails and names on its own.",
+    "annotations": { "title": "Search Sentry", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "resource":    { "type": "string", "enum": ["issues", "projects", "teams", "users"], "description": "What to search (default: issues)" },
-        "projectSlug": { "type": "string", "description": "Project slug, e.g. \"my-web-app\" (required for resource=issues)" },
-        "project":     { "type": "string", "description": "Alias for projectSlug" },
-        "query":       { "type": "string", "description": "Sentry search query for issues (e.g. \"is:unresolved environment:production\"), or name/email filter for users" },
-        "status":      { "type": "string", "enum": ["resolved", "unresolved", "ignored"], "description": "Status filter, appended to query (issues only)" },
-        "limit":       { "type": "number", "description": "Max results, 1-100 (default 25)", "default": 25, "minimum": 1, "maximum": 100 },
-        "cursor":      { "type": "string", "description": "Pagination cursor from a previous response" },
-        "format":      { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+        "resource":     { "type": "string", "enum": ["issues", "projects", "teams", "users"], "description": "What to search (default: issues)" },
+        "projectSlug":  { "type": "string", "description": "Project slug, e.g. \"my-web-app\". Optional for resource=issues — omit it to search every project in the organization." },
+        "project":      { "type": "string", "description": "Alias for projectSlug" },
+        "query":        { "type": "string", "description": "Sentry issue search query, or a name/email filter for users. Issue examples: \"is:unresolved\", \"assigned:me\", \"environment:production\", \"timesSeen:>100\", \"firstSeen:-24h\", \"release:1.2.3\"." },
+        "status":       { "type": "string", "enum": ["resolved", "unresolved", "ignored"], "description": "Status filter, appended to query (issues only)" },
+        "limit":        { "type": "number", "description": "Max results, 1-100 (default 25)", "default": 25, "minimum": 1, "maximum": 100 },
+        "cursor":       { "type": "string", "description": "Pagination cursor from a previous response" },
+        "format":       { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
       }
     }
   },
   {
     "name": "sentry_get_issue",
-    "description": "Full details for one Sentry issue by ID or URL. Returns essential metadata by default to keep the response compact. Pass includeLatestEvent=true to also pull a trimmed version of the most recent event. Use the filtering knobs (includeFields, excludeFields, grepPattern, maxStackFrames) to slim the response further when stack traces are large.",
+    "description": "Full details for one Sentry issue by ID or URL. Returns a compact projection of the issue's metadata; pass includeLatestEvent=true to also pull a trimmed version of the most recent event. The response's `_full` field is the endpoint that returns everything, for use with `sentry_raw_api path=...`. Use includeFields, excludeFields, grepPattern and maxStackFrames to slim it further.",
+    "annotations": { "title": "Get Sentry issue", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "issueIdOrUrl":       { "type": "string", "description": "Sentry issue ID (e.g. \"123456\") or full issue URL" },
-        "includeLatestEvent": { "type": "boolean", "description": "Include latest event entries (default false)", "default": false },
-        "includeFields":      { "type": "array", "items": { "type": "string" }, "description": "Whitelist of fields to keep. Dot notation supported (e.g. \"latest_event.entries\")." },
-        "excludeFields":      { "type": "array", "items": { "type": "string" }, "description": "Blacklist of fields to drop. Applied only when includeFields is unset." },
-        "grepPattern":        { "type": "string", "description": "Regex to filter response content. Returns only matching lines with surrounding context." },
-        "maxStackFrames":     { "type": "number", "description": "Trim stack traces to the last N frames (the most relevant ones)." },
-        "format":             { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+        "issueIdOrUrl":        { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "includeLatestEvent":  { "type": "boolean", "description": "Include latest event entries (default false)", "default": false },
+        "includeFields":       { "type": "array", "items": { "type": "string" }, "description": "Whitelist of fields to keep. Dot notation supported (e.g. \"latest_event.entries\")." },
+        "excludeFields":       { "type": "array", "items": { "type": "string" }, "description": "Blacklist of fields to drop. Applied only when includeFields is unset." },
+        "grepPattern":         { "type": "string", "description": "Regex filtering the rendered response — the TOON or JSON text you would otherwise receive, not the raw Sentry JSON. Returns matching lines plus one line of context either side, and always the table header. Case-insensitive." },
+        "maxStackFrames":      { "type": "number", "description": "Trim stack traces to the last N frames (the most relevant ones)." },
+        "format":              { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
       },
       "required": ["issueIdOrUrl"]
     }
   },
   {
     "name": "sentry_get_event",
-    "description": "Full details for a specific event in a project. Sentry events can be very large — by default returns at most 5 entries, prioritising exception → message → breadcrumbs → request. Pass entryType to filter to a single entry kind, or limit/offset to page through entries.",
+    "description": "Full details for a specific event in a project. Sentry events can be very large — by default returns at most 5 entries, prioritising exception → message → breadcrumbs → request, each projected down to what a reader acts on. `entries_info.available_types` lists every entry the event has; pass entryType to filter to one kind, or limit/offset to page. The `_full` field is the endpoint that returns the whole event. Pass issueIdOrUrl on its own to read that issue's latest event — no project slug needed.",
+    "annotations": { "title": "Get Sentry event", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "projectSlug": { "type": "string", "description": "Project slug, e.g. \"my-web-app\"" },
-        "project":     { "type": "string", "description": "Alias for projectSlug" },
-        "eventId":     { "type": "string", "description": "Event ID" },
-        "limit":       { "type": "number", "description": "Max entries to return (default 5)", "default": 5, "minimum": 1 },
-        "offset":      { "type": "number", "description": "Entry pagination offset (default 0)", "default": 0, "minimum": 0 },
-        "entryType":   { "type": "string", "enum": ["exception", "message", "breadcrumbs", "request", "threads", "debugmeta", "contexts"], "description": "Return only entries of this type" },
-        "format":      { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
-      },
-      "required": ["eventId"]
+        "projectSlug":   { "type": "string", "description": "Project slug, e.g. \"my-web-app\"" },
+        "project":       { "type": "string", "description": "Alias for projectSlug" },
+        "issueIdOrUrl":  { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "eventId":       { "type": "string", "description": "Event ID, or \"latest\" (the default when omitted) for the most recent event." },
+        "limit":         { "type": "number", "description": "Max entries to return (default 5)", "default": 5, "minimum": 1 },
+        "offset":        { "type": "number", "description": "Entry pagination offset (default 0)", "default": 0, "minimum": 0 },
+        "entryType":     { "type": "string", "enum": ["exception", "message", "breadcrumbs", "request", "threads", "debugmeta", "contexts"], "description": "Return only entries of this type" },
+        "format":        { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+      }
     }
   },
   {
     "name": "sentry_mutate_issue",
-    "description": "Update status, change assignee, and/or add a comment on a Sentry issue in one call. Use ONLY when the user explicitly asks to \"resolve issue 123\", \"ignore this issue\", \"assign 123 to alice\", or \"add a comment on 123\". Do NOT pre-emptively resolve or reassign issues during exploration. For assignedTo, look the username up first via `sentry_search resource=users` — guessing from email prefixes silently fails.",
+    "description": "Update status, change assignee, and/or add a comment on a Sentry issue in one call. Use ONLY when the user explicitly asks to \"resolve issue 123\", \"ignore this issue\", \"assign 123 to alice\", or \"add a comment on 123\". Do NOT pre-emptively resolve or reassign issues during exploration. assignedTo accepts a username, email, real name, or \"team:slug\" and is resolved server-side; an assignment that does not stick is reported as an error rather than a success.",
+    "annotations": { "title": "Update Sentry issue", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "issueId":    { "type": "string", "description": "Sentry issue ID to mutate" },
-        "status":     { "type": "string", "enum": ["resolved", "unresolved", "ignored"], "description": "New status (optional)" },
-        "assignedTo": { "type": "string", "description": "Username, email, or team:slug to assign to. Pass empty string to unassign." },
-        "comment":    { "type": "string", "description": "Comment to add after other mutations (optional)" }
+        "issueId":     { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "status":      { "type": "string", "enum": ["resolved", "unresolved", "ignored"], "description": "New status (optional)" },
+        "assignedTo":  { "type": "string", "description": "Who to assign to: a username, an email, a real name, or \"team:slug\". Emails and names are resolved to a username server-side, and an ambiguous match comes back as an error listing the candidates. Pass an empty string to unassign." },
+        "comment":     { "type": "string", "description": "Comment to add after other mutations (optional)" }
       },
       "required": ["issueId"]
     }
@@ -75,60 +80,67 @@
   {
     "name": "sentry_comment",
     "description": "Add, update, or delete a comment on a Sentry issue. action defaults to \"add\". Can only edit/delete your own comments.",
+    "annotations": { "title": "Sentry issue comment", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "action":    { "type": "string", "enum": ["add", "update", "delete"], "description": "Operation (default: add)" },
-        "issueId":   { "type": "string", "description": "Sentry issue ID" },
-        "commentId": { "type": "string", "description": "Comment ID (required for update/delete)" },
-        "body":      { "type": "string", "description": "Comment text (required for add/update)" }
+        "action":     { "type": "string", "enum": ["add", "update", "delete"], "description": "Operation (default: add)" },
+        "issueId":    { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "commentId":  { "type": "string", "description": "Comment ID (required for update/delete)" },
+        "body":       { "type": "string", "description": "Comment text (required for add/update)" }
       },
       "required": ["issueId"]
     }
   },
   {
     "name": "sentry_stack_frames",
-    "description": "Extract structured stack-trace frames from an event. Optimised for debugging — returns only function/file/line/inApp without the surrounding event noise. Much more compact than sentry_get_event for stack analysis.",
+    "description": "Extract structured stack-trace frames from an event. Optimised for debugging — a flat table of function/file/line/inApp with none of the surrounding event noise, plus `source`: the source-code window for the deepest in-app frame. Columns this platform never populates (module, package, addresses) are dropped from the response. Much more compact than sentry_get_event for stack analysis. Pass issueIdOrUrl on its own to read the latest event's trace for that issue — no project slug needed.",
+    "annotations": { "title": "Sentry stack frames", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "projectSlug": { "type": "string", "description": "Project slug" },
-        "project":     { "type": "string", "description": "Alias for projectSlug" },
-        "eventId":     { "type": "string", "description": "Event ID" },
-        "inAppOnly":   { "type": "boolean", "description": "Drop system/library frames (default false)", "default": false },
-        "maxFrames":   { "type": "number", "description": "Max frames, keeping the most recent / bottom of stack (default 50)", "default": 50 },
-        "format":      { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
-      },
-      "required": ["eventId"]
+        "projectSlug":   { "type": "string", "description": "Project slug" },
+        "project":       { "type": "string", "description": "Alias for projectSlug" },
+        "issueIdOrUrl":  { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "eventId":       { "type": "string", "description": "Event ID, or \"latest\" (the default when omitted) for the most recent event." },
+        "inAppOnly":     { "type": "boolean", "description": "Drop system/library frames (default false)", "default": false },
+        "maxFrames":     { "type": "number", "description": "Max frames, keeping the most recent / bottom of stack (default 50)", "default": 50 },
+        "format":        { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+      }
     }
   },
   {
     "name": "sentry_check_dsym",
-    "description": "Check whether iOS / macOS / Android debug symbols (dSYM, ProGuard mapping) are missing for an event. Missing symbols cause stack traces to show addresses instead of function names. Returns the UUIDs to upload.",
+    "description": "Check whether iOS / macOS / Android debug symbols (dSYM, ProGuard mapping) are missing for an event. Missing symbols cause stack traces to show addresses instead of function names. Returns the UUIDs to upload. Pass issueIdOrUrl on its own to check that issue's latest event — no project slug needed.",
+    "annotations": { "title": "Check Sentry debug symbols", "readOnlyHint": true },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "projectSlug": { "type": "string", "description": "Project slug, e.g. \"apple-ios\"" },
-        "project":     { "type": "string", "description": "Alias for projectSlug" },
-        "eventId":     { "type": "string", "description": "Event ID (optional — if omitted, checks the most recent issue's latest event)" },
-        "format":      { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+        "projectSlug":   { "type": "string", "description": "Project slug, e.g. \"apple-ios\"" },
+        "project":       { "type": "string", "description": "Alias for projectSlug" },
+        "issueIdOrUrl":  { "type": "string", "description": "Issue reference: numeric ID (\"60741\"), short ID as printed by sentry_get_dev_context and returned on every issue row (\"PROJECT-ABC\"), or a full issue URL." },
+        "eventId":       { "type": "string", "description": "Event ID, or \"latest\" (the default when omitted) for the most recent event." },
+        "format":        { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
       }
     }
   },
   {
     "name": "sentry_raw_api",
-    "description": "Make a raw call to any Sentry API endpoint. Use when the structured tools above don't cover what you need. Endpoint should be the path after /api/0/ (e.g. \"organizations/my-org/releases/\"). For endpoints that may return large events, pass grepPattern to filter inline OR maxChars/charOffset to page through.",
+    "description": "Make a raw call to any Sentry API endpoint. Use when the structured tools above don't cover what you need, and to pull detail a compact response left out: pass the `_full` endpoint from any response together with path=<dotted.path> to fetch just that subtree. Endpoint should be the path after /api/0/ (e.g. \"organizations/my-org/releases/\"). A response over ~20k tokens comes back as a shape sketch instead of its contents — narrow it with path, grepPattern, or maxChars/charOffset.",
+    "annotations": { "title": "Raw Sentry API call", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false },
     "inputSchema": {
       "type": "object",
       "properties": {
-        "endpoint":    { "type": "string", "description": "API path, e.g. \"projects/my-org/my-project/events/abc123/\". Leading /api/0/ is stripped if present." },
-        "method":      { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE"], "description": "HTTP method (default GET)", "default": "GET" },
-        "params":      { "type": "object", "description": "Query parameters" },
-        "body":        { "type": "object", "description": "Request body for POST/PUT" },
-        "grepPattern": { "type": "string", "description": "Regex to filter response content inline (returns matching lines plus context)." },
-        "maxChars":    { "type": "number", "description": "Max characters of JSON response to return. Pair with charOffset to page through large responses." },
-        "charOffset":  { "type": "number", "description": "Skip this many characters from the start of the response (for paging)." },
-        "format":      { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
+        "endpoint":     { "type": "string", "description": "API path, e.g. \"projects/my-org/my-project/events/abc123/\". Leading /api/0/ is stripped if present. The `_full` field of a compact response holds exactly this value for that response's complete payload." },
+        "path":         { "type": "string", "description": "Dot-separated path into the response, applied before any other filter. Numeric segments index arrays, e.g. \"entries.0.data.values.0.stacktrace.frames\". A wrong path reports the keys that were actually available." },
+        "outline":      { "type": "boolean", "description": "Return the shape of the response (keys, array lengths, leaf types) instead of its contents. Combine with path to sketch one subtree before pulling it.", "default": false },
+        "method":       { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE"], "description": "HTTP method (default GET)", "default": "GET" },
+        "params":       { "type": "object", "description": "Query parameters" },
+        "body":         { "type": "object", "description": "Request body for POST/PUT" },
+        "grepPattern":  { "type": "string", "description": "Regex filtering the rendered response — the TOON or JSON text you would otherwise receive, not the raw Sentry JSON. Returns matching lines plus one line of context either side, and always the table header. Case-insensitive." },
+        "maxChars":     { "type": "number", "description": "Max characters of JSON response to return. Pair with charOffset to page through large responses." },
+        "charOffset":   { "type": "number", "description": "Skip this many characters from the start of the response (for paging)." },
+        "format":       { "type": "string", "enum": ["toon", "json"], "description": "Output serialization: \"toon\" (default, ~30-60% fewer tokens) or \"json\".", "default": "toon" }
       },
       "required": ["endpoint"]
     }

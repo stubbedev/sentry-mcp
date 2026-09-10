@@ -88,3 +88,72 @@ func TestServerToolRoundTrip(t *testing.T) {
 		t.Fatalf("wrong-typed arg should be an error, got: %+v", badType.Content)
 	}
 }
+
+// TestToolAnnotations checks that every tool declares whether it writes, so a
+// host can stop prompting for reads and gate the ones that mutate. A new tool
+// added to tools.json without annotations fails here rather than silently
+// arriving as "unknown, assume the worst".
+func TestToolAnnotations(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[]`))
+	}))
+	defer stub.Close()
+
+	sentry = NewSentryClient(stub.URL, "tok", "konform")
+	defer func() { sentry = nil }()
+
+	srv := mcp.NewServer(&mcp.Implementation{Name: "sentry-mcp", Version: "test"}, nil)
+	registerTools(srv)
+
+	ctx := context.Background()
+	clientT, serverT := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+
+	// sentry_raw_api is here because it accepts PUT/POST/DELETE, even though
+	// GET is the common case: it is declared by what it can do.
+	writers := map[string]bool{
+		"sentry_mutate_issue": true,
+		"sentry_comment":      true,
+		"sentry_raw_api":      true,
+	}
+	seen := 0
+	for _, tool := range tools.Tools {
+		seen++
+		a := tool.Annotations
+		if a == nil {
+			t.Errorf("%s has no annotations", tool.Name)
+			continue
+		}
+		if a.Title == "" {
+			t.Errorf("%s has no annotation title", tool.Name)
+		}
+		if writers[tool.Name] {
+			if a.ReadOnlyHint {
+				t.Errorf("%s mutates Sentry but is marked read-only", tool.Name)
+			}
+			if a.DestructiveHint == nil || !*a.DestructiveHint {
+				t.Errorf("%s should be marked destructive", tool.Name)
+			}
+			continue
+		}
+		if !a.ReadOnlyHint {
+			t.Errorf("%s only reads but is not marked read-only", tool.Name)
+		}
+	}
+	if seen != 9 {
+		t.Fatalf("checked %d tools, want 9", seen)
+	}
+}

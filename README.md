@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**, written in Go. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
 
-Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it five interchangeable ways — a one-click Claude Desktop bundle, `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses default to compact [TOON](#output-format-toon) to save tokens.
+Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it five interchangeable ways — a one-click Claude Desktop bundle, `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses are [projected and serialized as TOON](#compact-responses) — ~26% of the tokens of the raw nested JSON, with `_full` on every response to fetch back anything that was trimmed.
 
 > **Note:** This server targets self-hosted Sentry installs. It will also work against sentry.io, but the official Sentry MCP is a better fit there.
 
@@ -25,7 +25,7 @@ Ships as a single static binary (stdlib + one small Go dependency) with a fast c
 | `sentry_get_event` | Full details for one event with smart entry prioritisation and pagination |
 | `sentry_stack_frames` | Structured stack-trace frames only (function/file/line/inApp) — best for debug analysis |
 | `sentry_check_dsym` | Check whether iOS/macOS/Android debug symbols are missing for an event |
-| `sentry_raw_api` | Raw call to any Sentry API endpoint with optional `grepPattern` or `maxChars`/`charOffset` paging |
+| `sentry_raw_api` | Raw call to any Sentry API endpoint; drill with `path`, sketch with `outline`, filter with `grepPattern`, page with `maxChars`/`charOffset` |
 
 ### Mutation
 
@@ -475,14 +475,81 @@ Every data tool accepts `format` (`toon` | `json`) to override per call, and the
 
 ---
 
-## Filtering large responses
+## Issue references
 
-Sentry events can blow past LLM context limits — a single event with a long stack trace and many breadcrumbs is easily 100K+ tokens. On top of TOON, the tools have several knobs to keep responses small:
+Every tool that takes an issue accepts whichever form you have, because these are the forms the server itself hands out:
 
-- `sentry_get_issue`: pass `maxStackFrames=5`, `excludeFields=["stats","annotations"]`, or `grepPattern="AttributeError|process_activity"` to slim things down. Use `includeFields=["id","title","latest_event.entries"]` for the absolute minimum.
-- `sentry_get_event`: defaults to 5 prioritised entries; pass `entryType="exception"` to focus on a stack trace, or `limit`/`offset` to page through.
-- `sentry_stack_frames`: returns just frames — ideal when all you need is the call site.
-- `sentry_raw_api`: warns when responses exceed ~20K tokens and suggests grep patterns; pass `grepPattern` directly to filter inline.
+| Form | Example |
+| --- | --- |
+| Numeric ID | `60741` |
+| Short ID | `KONTAINER-BACKEND-4JH` — what `sentry_get_dev_context` prints and every issue row returns |
+| Issue URL | `https://sentry.example.com/organizations/org/issues/60741/` (short-ID and `?query=` links too) |
+
+Short IDs resolve through `/organizations/{org}/shortids/{shortId}/`; numeric IDs and URLs are parsed locally with no extra request.
+
+### Issue → trace in one call
+
+`sentry_get_event`, `sentry_stack_frames`, and `sentry_check_dsym` take `issueIdOrUrl` on its own and read that issue's latest event — no project slug, no event ID:
+
+```
+sentry_stack_frames issueIdOrUrl=KONTAINER-BACKEND-4JH
+```
+
+The full resolution order is: an issue reference (with an optional `eventId`, where `latest` is the default) uses the issue-scoped endpoint; `projectSlug` + `eventId` reads that event; `projectSlug` alone falls through to the project's most recent issue. Failing that, the error names both routes and lists the org's project slugs.
+
+`sentry_search resource=issues` searches the whole organization when no `projectSlug` is given, so listing projects first is no longer a prerequisite.
+
+### Assignment
+
+`sentry_mutate_issue assignedTo=` accepts a username, an email, a real name, or `team:slug`, and resolves it against the org's members. An ambiguous name is an error listing the candidates. Sentry accepts an actor string it cannot resolve and silently leaves the issue unassigned, so the response is verified — an assignment that did not stick is reported as an error rather than a confirmation.
+
+---
+
+## Compact responses
+
+Sentry events can blow past LLM context limits — a single event with a long stack trace and many breadcrumbs is easily 100K+ tokens. TOON is only half the saving; the other half is projecting each payload before it is serialized. On a 25-issue list the two together come to **~26% of the raw nested shape** (see `TestIssueListStaysTabular`).
+
+TOON only collapses an array into a table when every row is a flat object with the same key set — one nested object, or one key missing from a single row, and the whole array falls back to expanded per-field blocks at ~2.5x the characters. So `compact.go` keeps rows flat and uniform:
+
+- **Nested objects become scalar columns.** `project` → its slug, `assignedTo` → a name, `metadata.type`/`.value` → `metaType`/`metaValue`.
+- **Columns null in every row are dropped**, so `sentry_stack_frames` on a PHP project has no `instructionAddr`/`symbolAddr`/`module` columns at all. The decision is made per response, never per row: omitting nulls row-by-row leaves ragged keys, which de-tabularizes the array and costs *more* than emitting the nulls.
+- **Columns identical in every row are hoisted into `_all`** and stated once instead of 25 times.
+- **Derivable values are dropped.** `permalink` never ships — it is a pure function of `id`, and the link templates are in the server instructions. Timestamps come back at second precision, still absolute so they stay comparable across calls. A `metaType`/`metaValue` pair that merely restates `title` is dropped, as is a project `name` that only repeats its `slug`.
+- **Advice prose is stated once**, in the server instructions, rather than re-sent with every response.
+
+Identifiers always survive — `id`, `shortId`, `eventID`, `next_cursor` are never hoisted or dropped — so a row can always be cross-referenced against another call.
+
+### Getting the detail back
+
+Every projected response carries `_full`: the `sentry_raw_api` endpoint that returns the complete, unprojected payload. Nothing is lost, it just does not sit in the context window until asked for.
+
+```
+sentry_raw_api endpoint=<_full> outline=true                       # sketch the shape
+sentry_raw_api endpoint=<_full> path=entries.0.data.values.0       # pull one subtree
+```
+
+`path` walks the response with dot notation and numeric array indices, and a wrong path replies with the keys that were actually available. This is deliberately an endpoint string rather than a server-side handle: a handle would need session affinity to resolve, so it would die on restart and would not work across replicas or under stateless HTTP.
+
+A response over ~20K tokens comes back as a shape sketch instead of its contents, so the follow-up is a path into the part that matters rather than a guessed grep pattern.
+
+### Per-call knobs
+
+- `sentry_get_issue`: `maxStackFrames=5`, `excludeFields=["stats","annotations"]`, `grepPattern="AttributeError|process_activity"`, or `includeFields=["id","title","latest_event.entries"]` for the absolute minimum.
+- `sentry_get_event`: defaults to 5 prioritised entries; `entries_info.available_types` lists the rest. Pass `entryType="exception"` for a stack trace, or `limit`/`offset` to page.
+- `sentry_stack_frames`: a flat frame table plus `source` — the source-code window for the deepest in-app frame, rather than context lines repeated on every frame.
+- `sentry_raw_api`: `path`, `outline`, `grepPattern`, `maxChars`/`charOffset`.
+
+`grepPattern` filters the **rendered** response — the TOON or JSON text you would otherwise receive, not the raw Sentry JSON — so patterns are written against what the response actually looks like. It returns matching lines plus one line of context either side, always keeps the table header (without it the matched rows have no column names), and is case-insensitive.
+
+---
+
+## Reliability
+
+**Tool annotations.** Every tool declares whether it writes, via the MCP `annotations` field: the six read tools carry `readOnlyHint`, and `sentry_mutate_issue`, `sentry_comment`, and `sentry_raw_api` carry `destructiveHint`. Hosts use these to stop prompting for reads and gate the ones that mutate. `sentry_raw_api` is declared destructive because it accepts `PUT`/`POST`/`DELETE`, even though `GET` is the common case.
+
+**Transient failures are retried.** A request is sent up to 3 times with exponential backoff from 250ms, honouring a `Retry-After` header when the server sends one. `429` is retried for any method, since the request was rejected before it did anything; `502`/`503`/`504` are retried only for `GET`/`PUT`/`DELETE`, because a `POST` that may already have been applied would double-post a comment. Request bodies are replayed per attempt. A wait that would outlast the call's deadline is declined rather than slept through, so a retry never eats the whole 60s tool-call budget just to fail at the end of it.
+
+**Startup does not block on Sentry.** The identity and project-list lookups that decorate the server instructions run concurrently under a 5s budget, and the server starts with whatever came back. Previously they ran sequentially on an unbounded context inside `main()` before the transport started, so an unresponsive instance could leave a GUI client looking hung with no tools listed.
 
 ---
 
@@ -565,6 +632,9 @@ Layout:
 - `http.go` — Streamable HTTP transport wiring (SDK handler, sessions, `--http`)
 - `roots.go` — workspace roots: header-pinned (proxy) or fetched via the client `roots/list`
 - `sentry.go` — Sentry API client, tool handlers, TOON/JSON rendering, helpers
+- `compact.go` — response projection: flat uniform rows, hoisted constants, dropped derivables
+- `drill.go` — shape sketching and dot-path walking for `sentry_raw_api`
+- `resolve.go` — issue/event/assignee resolution: short IDs, issue-scoped events, member lookup
 - `config.go` — config resolution (`--config` / env / file / XDG)
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`
 - `bin/cli.mjs` + `scripts/` — npm wrapper (downloads + execs the binary)

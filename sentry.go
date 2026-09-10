@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -222,67 +224,47 @@ func cutField(field string) (parent, rest string, ok bool) {
 	return field[:idx], field[idx+1:], true
 }
 
-// grepFilter filters pretty-printed JSON to lines matching pattern (plus one
-// line of context on each side) and attempts to re-parse the result as JSON.
-func grepFilter(data any, pattern string) (any, error) {
+// grepRendered filters a response to the lines matching pattern, plus one line
+// of context either side.
+//
+// It greps the text the caller actually receives — rendered in the call's
+// output format — rather than a pretty-printed JSON form. Grepping JSON while
+// returning TOON meant a pattern had to be written against a shape the response
+// never showed: `"function":` matched nothing a reader could see. For a TOON
+// table the header line is always kept, since without it the matched rows have
+// no column names.
+func grepRendered(ctx context.Context, data any, pattern string) (string, error) {
 	re, err := regexp.Compile("(?i)" + pattern)
 	if err != nil {
-		return nil, fmt.Errorf("invalid grepPattern: %v", err)
+		return "", fmt.Errorf("invalid grepPattern: %v", err)
 	}
-	jsonStr := marshalIndent(data)
-	lines := strings.Split(jsonStr, "\n")
-	var matched []string
+	lines := strings.Split(renderString(ctx, data), "\n")
+	keep := make([]bool, len(lines))
+	matches := 0
 	for i, line := range lines {
-		if re.MatchString(line) {
-			if i > 0 {
-				matched = append(matched, lines[i-1])
-			}
-			matched = append(matched, line)
-			if i < len(lines)-1 {
-				matched = append(matched, lines[i+1])
-			}
+		if !re.MatchString(line) {
+			continue
+		}
+		matches++
+		if i > 0 {
+			keep[i-1] = true
+		}
+		keep[i] = true
+		if i+1 < len(lines) {
+			keep[i+1] = true
 		}
 	}
-	filtered := strings.Join(matched, "\n")
-	var parsed any
-	if err := json.Unmarshal([]byte(filtered), &parsed); err == nil {
-		return parsed, nil
+	if matches == 0 {
+		return fmt.Sprintf("No lines match %q (searched %d lines of output).", pattern, len(lines)), nil
 	}
-	return map[string]any{"grep_results": matched, "original_pattern": pattern}, nil
-}
-
-// truncateStackFrames trims exception stack traces inside event entries to the
-// last maxFrames frames, recording how many were omitted.
-func truncateStackFrames(data any, maxFrames int) any {
-	switch v := data.(type) {
-	case []any:
-		for i, item := range v {
-			v[i] = truncateStackFrames(item, maxFrames)
+	keep[0] = true // the table header, or the first field of an object
+	out := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if keep[i] {
+			out = append(out, line)
 		}
-		return v
-	case map[string]any:
-		entries, _ := v["entries"].([]any)
-		for _, e := range entries {
-			entry, _ := e.(map[string]any)
-			if entry == nil || asString(entry, "type") != "exception" {
-				continue
-			}
-			edata, _ := entry["data"].(map[string]any)
-			values, _ := edata["values"].([]any)
-			for _, val := range values {
-				value, _ := val.(map[string]any)
-				stacktrace, _ := value["stacktrace"].(map[string]any)
-				frames, _ := stacktrace["frames"].([]any)
-				if len(frames) > maxFrames {
-					stacktrace["frames"] = frames[len(frames)-maxFrames:]
-					stacktrace["frames_omitted"] = len(frames) - maxFrames
-				}
-			}
-		}
-		return v
-	default:
-		return data
 	}
+	return strings.Join(out, "\n"), nil
 }
 
 func asString(m map[string]any, key string) string {
@@ -290,84 +272,6 @@ func asString(m map[string]any, key string) string {
 		return s
 	}
 	return ""
-}
-
-// essentialIssueFields keeps only the metadata needed to keep issue responses compact.
-func essentialIssueFields(issue map[string]any) map[string]any {
-	keys := []string{
-		"id", "shortId", "title", "culprit", "permalink", "logger", "level",
-		"status", "type", "platform", "project", "count", "userCount",
-		"firstSeen", "lastSeen", "assignedTo", "metadata",
-	}
-	out := map[string]any{}
-	for _, k := range keys {
-		out[k] = issue[k]
-	}
-	return out
-}
-
-func essentialEventEntry(entry map[string]any) map[string]any {
-	switch asString(entry, "type") {
-	case "exception":
-		data, _ := entry["data"].(map[string]any)
-		values, _ := data["values"].([]any)
-		outValues := make([]any, 0, len(values))
-		for _, v := range values {
-			exc, _ := v.(map[string]any)
-			if exc == nil {
-				continue
-			}
-			out := map[string]any{
-				"type":      exc["type"],
-				"value":     exc["value"],
-				"mechanism": exc["mechanism"],
-			}
-			if stacktrace, ok := exc["stacktrace"].(map[string]any); ok {
-				frames, _ := stacktrace["frames"].([]any)
-				if len(frames) > 5 {
-					frames = frames[len(frames)-5:]
-				}
-				outFrames := make([]any, 0, len(frames))
-				for _, f := range frames {
-					frame, _ := f.(map[string]any)
-					if frame == nil {
-						continue
-					}
-					fo := map[string]any{
-						"filename": frame["filename"],
-						"function": frame["function"],
-						"lineNo":   frame["lineNo"],
-						"colNo":    frame["colNo"],
-						"absPath":  frame["absPath"],
-						"inApp":    frame["in_app"],
-					}
-					if ctx, ok := frame["context"].([]any); ok {
-						if len(ctx) > 7 {
-							ctx = ctx[:7]
-						}
-						fo["context"] = ctx
-					}
-					outFrames = append(outFrames, fo)
-				}
-				out["stacktrace"] = map[string]any{"frames": outFrames}
-			} else {
-				out["stacktrace"] = nil
-			}
-			outValues = append(outValues, out)
-		}
-		return map[string]any{"type": "exception", "data": map[string]any{"values": outValues}}
-	case "message":
-		return entry
-	case "breadcrumbs":
-		data, _ := entry["data"].(map[string]any)
-		values, _ := data["values"].([]any)
-		if len(values) > 10 {
-			values = values[len(values)-10:]
-		}
-		return map[string]any{"type": "breadcrumbs", "data": map[string]any{"values": values}}
-	default:
-		return map[string]any{"type": entry["type"], "_truncated": true}
-	}
 }
 
 // ── Sentry client ────────────────────────────────────────────────────────────
@@ -378,6 +282,17 @@ type SentryClient struct {
 	token   string
 	http    *http.Client
 }
+
+const (
+	// maxAttempts bounds how many times one Sentry request is sent.
+	maxAttempts = 3
+	// retryBaseWait is the first backoff, doubling per attempt unless the
+	// server asks for longer via Retry-After.
+	retryBaseWait = 250 * time.Millisecond
+	// maxRetryWait caps a single wait, so an extravagant Retry-After is
+	// declined rather than obeyed inside a 60s tool call.
+	maxRetryWait = 10 * time.Second
+)
 
 func NewSentryClient(baseURL, token, orgSlug string) *SentryClient {
 	return &SentryClient{
@@ -394,6 +309,8 @@ type apiResponse struct {
 	status     int
 }
 
+// request performs one Sentry API call, retrying transient failures within
+// whatever deadline the caller's context carries.
 func (c *SentryClient) request(ctx context.Context, method, path string, params map[string]any, body any) (apiResponse, error) {
 	cleanPath := path
 	if !strings.HasPrefix(cleanPath, "/") {
@@ -414,21 +331,53 @@ func (c *SentryClient) request(ctx context.Context, method, path string, params 
 	}
 	fullURL := c.baseURL + "/api/0" + cleanPath + qs
 
-	var reqBody io.Reader
+	// Marshalled once but wrapped in a fresh reader per attempt, since a
+	// consumed body cannot be replayed.
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return apiResponse{}, err
 		}
-		reqBody = bytes.NewReader(b)
+		bodyBytes = b
 	}
 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	var lastErr error
+	wait := time.Duration(0)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 && !waitBeforeRetry(ctx, wait) {
+			break
+		}
+		resp, retryAfter, retryable, err := c.attempt(ctx, method, fullURL, cleanPath, bodyBytes)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !retryable {
+			return apiResponse{}, err
+		}
+		wait = retryBaseWait << attempt
+		if retryAfter > wait {
+			wait = retryAfter
+		}
+	}
+	return apiResponse{}, lastErr
+}
+
+// attempt makes a single HTTP call. retryable reports whether repeating it is
+// both safe and worthwhile; retryAfter carries the server's own backoff ask.
+func (c *SentryClient) attempt(ctx context.Context, method, fullURL, cleanPath string, bodyBytes []byte) (resp apiResponse, retryAfter time.Duration, retryable bool, err error) {
+	var reqBody io.Reader
+	if bodyBytes != nil {
+		reqBody = bytes.NewReader(bodyBytes)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, reqBody)
 	if err != nil {
-		return apiResponse{}, err
+		return apiResponse{}, 0, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -436,24 +385,90 @@ func (c *SentryClient) request(ctx context.Context, method, path string, params 
 
 	res, err := c.http.Do(req)
 	if err != nil {
-		return apiResponse{}, err
+		// No response arrived, so whether the request was applied is unknown:
+		// only methods that are safe to repeat may be retried.
+		return apiResponse{}, 0, ctx.Err() == nil && repeatableMethod(method), err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		errText, _ := io.ReadAll(res.Body)
-		return apiResponse{}, fmt.Errorf("%s", formatSentryError(res.StatusCode, method, cleanPath, parseSentryErrorDetails(string(errText))))
+		wait := parseRetryAfter(res.Header.Get("Retry-After"))
+		return apiResponse{}, wait, retryableStatus(res.StatusCode, method),
+			fmt.Errorf("%s", formatSentryError(res.StatusCode, method, cleanPath, parseSentryErrorDetails(string(errText))))
 	}
 
-	resp := apiResponse{linkHeader: res.Header.Get("link"), status: res.StatusCode}
+	out := apiResponse{linkHeader: res.Header.Get("link"), status: res.StatusCode}
 	if res.StatusCode == 204 {
-		return resp, nil
+		return out, 0, false, nil
 	}
 	dec := json.NewDecoder(res.Body)
-	if err := dec.Decode(&resp.data); err != nil && err != io.EOF {
-		return apiResponse{}, err
+	if err := dec.Decode(&out.data); err != nil && err != io.EOF {
+		return apiResponse{}, 0, false, err
 	}
-	return resp, nil
+	return out, 0, false, nil
+}
+
+// repeatableMethod reports whether re-sending a request is free of side
+// effects. POST is excluded: a retried comment would post twice.
+func repeatableMethod(method string) bool {
+	return method == "GET" || method == "PUT" || method == "DELETE"
+}
+
+// retryableStatus decides whether a failure status is worth another attempt.
+// 429 means the request was rejected before it did anything, so it is safe to
+// repeat for any method; a gateway error may already have been applied, so
+// those are retried only for repeatable methods.
+func retryableStatus(status int, method string) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return repeatableMethod(method)
+	}
+	return false
+}
+
+// parseRetryAfter reads a Retry-After header in either of its forms: delay
+// seconds, or an HTTP date.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// waitBeforeRetry sleeps for d, reporting whether the wait completed. It
+// refuses a wait that would outlast the caller's deadline, so a retry never
+// eats the whole tool-call budget just to fail at the end of it.
+func waitBeforeRetry(ctx context.Context, d time.Duration) bool {
+	if d > maxRetryWait {
+		return false
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Now().Add(d).After(deadline) {
+		return false
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func toQueryString(v any) string {
@@ -588,19 +603,21 @@ func (c *SentryClient) listProjects(ctx context.Context, limit int, cursor strin
 	if len(arr) == 0 {
 		return textResult("No projects found."), nil
 	}
-	lines := []string{fmt.Sprintf("Projects in %q:", c.OrgSlug)}
+	rows := make([]map[string]any, 0, len(arr))
 	for _, p := range arr {
 		proj := toObject(p)
-		line := fmt.Sprintf("  • %v — %v", proj["slug"], proj["name"])
-		if pl := asString(proj, "platform"); pl != "" {
-			line += fmt.Sprintf(" (%s)", pl)
-		}
-		lines = append(lines, line)
+		rows = append(rows, map[string]any{
+			"id":       proj["id"],
+			"slug":     proj["slug"],
+			"name":     proj["name"],
+			"platform": proj["platform"],
+		})
 	}
-	if next := c.parseNextCursor(resp.linkHeader); next != "" {
-		lines = append(lines, "", "next_cursor: "+next)
-	}
-	return textResult(strings.Join(lines, "\n")), nil
+	dropMirror(rows, "name", "slug")
+	return jsonResult(ctx, compactTable("projects", rows, map[string]any{
+		"org":         c.OrgSlug,
+		"next_cursor": c.parseNextCursor(resp.linkHeader),
+	})), nil
 }
 
 func (c *SentryClient) listTeams(ctx context.Context, limit int, cursor string) (toolResult, error) {
@@ -616,11 +633,23 @@ func (c *SentryClient) listTeams(ctx context.Context, limit int, cursor string) 
 	if len(arr) == 0 {
 		return textResult("No teams found."), nil
 	}
-	next := c.parseNextCursor(resp.linkHeader)
-	if next == "" {
-		return jsonResult(ctx, arr), nil
+	// Asking for more columns than a given Sentry version populates costs
+	// nothing: tabular drops whichever of these come back null for every team.
+	rows := make([]map[string]any, 0, len(arr))
+	for _, t := range arr {
+		team := toObject(t)
+		rows = append(rows, map[string]any{
+			"id":          team["id"],
+			"slug":        team["slug"],
+			"name":        team["name"],
+			"memberCount": team["memberCount"],
+			"isMember":    team["isMember"],
+		})
 	}
-	return jsonResult(ctx, map[string]any{"teams": arr, "next_cursor": next}), nil
+	dropMirror(rows, "name", "slug")
+	return jsonResult(ctx, compactTable("teams", rows, map[string]any{
+		"next_cursor": c.parseNextCursor(resp.linkHeader),
+	})), nil
 }
 
 func (c *SentryClient) listUsers(ctx context.Context, query string, limit int, cursor string) (toolResult, error) {
@@ -643,32 +672,65 @@ func (c *SentryClient) listUsers(ctx context.Context, query string, limit int, c
 		}
 		return textResult(msg + "."), nil
 	}
-	summary := make([]any, 0, len(arr))
+	rows := make([]map[string]any, 0, len(arr))
 	for _, m := range arr {
 		member := toObject(m)
-		user := toObject(member["user"])
-		coalesce := func(a, fallbackKey string) any {
-			if user[a] != nil {
-				return user[a]
-			}
-			return member[fallbackKey]
+		// The nested user object wins wherever it has a value; the member
+		// record fills in for invited accounts that have no user yet.
+		merged := map[string]any{}
+		for k, v := range member {
+			merged[k] = v
 		}
-		summary = append(summary, map[string]any{
-			"username": coalesce("username", "email"),
-			"name":     coalesce("name", "name"),
-			"email":    coalesce("email", "email"),
-			"role":     member["role"],
+		for k, v := range toObject(member["user"]) {
+			if v != nil && v != "" {
+				merged[k] = v
+			}
+		}
+		rows = append(rows, map[string]any{
+			"username": pick(merged, "username", "email"),
+			"name":     pick(merged, "name"),
+			"email":    pick(merged, "email"),
+			"role":     merged["role"],
 		})
 	}
-	payload := map[string]any{"users": summary, "count": len(summary)}
-	if next := c.parseNextCursor(resp.linkHeader); next != "" {
-		payload["next_cursor"] = next
-	}
-	return jsonResult(ctx, payload), nil
+	dropMirror(rows, "email", "username")
+	dropMirror(rows, "name", "username")
+	return jsonResult(ctx, compactTable("users", rows, map[string]any{
+		"next_cursor": c.parseNextCursor(resp.linkHeader),
+	})), nil
 }
 
 func (c *SentryClient) getDevContext(ctx context.Context, req *mcp.CallToolRequest) (toolResult, error) {
-	me := c.whoami(ctx)
+	// Identity, the two issue queries and the client's roots are independent of
+	// each other, so they run together. This is the highest-frequency call in
+	// the server and it used to pay four sequential round trips.
+	var (
+		me               *identity
+		roots            []mcpRoot
+		assigned, recent []any
+		assignedErr      error
+		wg               sync.WaitGroup
+	)
+	issues := func(dst *[]any, errDst *error, params map[string]any) func() {
+		return func() {
+			defer wg.Done()
+			resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/", params, nil)
+			if err != nil {
+				if errDst != nil {
+					*errDst = err
+				}
+				return
+			}
+			*dst = toArray(resp.data)
+		}
+	}
+	wg.Add(4)
+	go func() { defer wg.Done(); me = c.whoami(ctx) }()
+	go func() { defer wg.Done(); roots = resolveRoots(ctx, req) }()
+	go issues(&assigned, &assignedErr, map[string]any{"query": "is:unresolved assigned:me", "limit": 10})()
+	go issues(&recent, nil, map[string]any{"query": "is:unresolved", "limit": 5, "sort": "new"})()
+	wg.Wait()
+
 	var lines []string
 	lines = append(lines, "Sentry instance: "+c.baseURL)
 	lines = append(lines, "Organization:    "+c.OrgSlug)
@@ -689,7 +751,7 @@ func (c *SentryClient) getDevContext(ctx context.Context, req *mcp.CallToolReque
 	// Workspace roots handed to the server by the MCP client (roots/list or a
 	// proxy-set header). These are the repo/working-tree a shell-calling tool
 	// would operate in.
-	if roots := resolveRoots(ctx, req); len(roots) > 0 {
+	if len(roots) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, "Workspace roots (from MCP client):")
 		for _, r := range roots {
@@ -720,39 +782,31 @@ func (c *SentryClient) getDevContext(ctx context.Context, req *mcp.CallToolReque
 		return out
 	}
 
-	if resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
-		"query": "is:unresolved assigned:me", "limit": 10,
-	}, nil); err == nil {
-		assigned := toArray(resp.data)
-		lines = append(lines, "")
-		if len(assigned) > 0 {
-			lines = append(lines, fmt.Sprintf("Unresolved issues assigned to you (%d):", len(assigned)))
-			lines = append(lines, renderIssues(assigned)...)
-		} else {
-			lines = append(lines, "No unresolved issues assigned to you.")
-		}
-	} else {
-		lines = append(lines, "")
-		lines = append(lines, "Could not fetch assigned issues: "+err.Error())
+	lines = append(lines, "")
+	switch {
+	case assignedErr != nil:
+		lines = append(lines, "Could not fetch assigned issues: "+assignedErr.Error())
+	case len(assigned) > 0:
+		lines = append(lines, fmt.Sprintf("Unresolved issues assigned to you (%d):", len(assigned)))
+		lines = append(lines, renderIssues(assigned)...)
+	default:
+		lines = append(lines, "No unresolved issues assigned to you.")
 	}
 
-	if resp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/", map[string]any{
-		"query": "is:unresolved", "limit": 5, "sort": "new",
-	}, nil); err == nil {
-		recent := toArray(resp.data)
-		if len(recent) > 0 {
-			lines = append(lines, "")
-			lines = append(lines, "Recent unresolved issues across the org (top 5):")
-			lines = append(lines, renderIssues(recent)...)
-		}
+	if len(recent) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "Recent unresolved issues across the org (top 5):")
+		lines = append(lines, renderIssues(recent)...)
 	}
 
+	// The short IDs above are accepted directly by every issue tool, so these
+	// hints name that path rather than sending the reader via a project list.
 	lines = append(lines,
 		"",
 		"Next steps:",
-		"  • sentry_search resource=projects — list available projects",
-		"  • sentry_search projectSlug=<slug> status=unresolved — list issues for a project",
-		"  • sentry_get_issue issueIdOrUrl=<id|url> — drill into a specific issue",
+		"  • sentry_search status=unresolved — issues across the whole org (add projectSlug=<slug> to scope)",
+		"  • sentry_get_issue issueIdOrUrl=<short-id|id|url> — drill into one of the issues above",
+		"  • sentry_stack_frames issueIdOrUrl=<short-id|id|url> — its stack trace, in one call",
 	)
 	return textResult(strings.Join(lines, "\n")), nil
 }
@@ -774,84 +828,104 @@ func (c *SentryClient) listIssues(ctx context.Context, projectSlug, query, statu
 	if cursor != "" {
 		params["cursor"] = cursor
 	}
-	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", params, nil)
+
+	// Without a project this searches the whole organization, which is the
+	// same endpoint sentry_get_dev_context uses. Requiring a slug here only
+	// forced a list-projects round trip first.
+	path := "/organizations/" + c.OrgSlug + "/issues/"
+	scope := c.OrgSlug + " (all projects)"
+	if projectSlug != "" {
+		path = "/projects/" + c.OrgSlug + "/" + projectSlug + "/issues/"
+		scope = projectSlug
+	}
+
+	resp, err := c.request(ctx, "GET", path, params, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
 	arr := toArray(resp.data)
-	issues := make([]any, 0, len(arr))
+	if len(arr) == 0 {
+		if q != "" {
+			return textResult(fmt.Sprintf("No issues in %s matching %q.", scope, q)), nil
+		}
+		return textResult(fmt.Sprintf("No issues in %s.", scope)), nil
+	}
+	rows := make([]map[string]any, 0, len(arr))
 	for _, i := range arr {
-		issues = append(issues, essentialIssueFields(toObject(i)))
+		rows = append(rows, issueRow(toObject(i)))
 	}
-	payload := map[string]any{"issues": issues, "count": len(issues)}
-	if next := c.parseNextCursor(resp.linkHeader); next != "" {
-		payload["next_cursor"] = next
-	}
-	return jsonResult(ctx, payload), nil
+	return jsonResult(ctx, compactTable("issues", rows, map[string]any{
+		"scope":       scope,
+		"next_cursor": c.parseNextCursor(resp.linkHeader),
+	})), nil
 }
 
 // ── Issue read ───────────────────────────────────────────────────────────────
 
-func (c *SentryClient) getIssue(ctx context.Context, issueIdOrUrl string, includeLatestEvent bool, includeFields, excludeFields []string, grepPattern string, maxStackFrames *int) (toolResult, error) {
-	issueId := extractIssueId(issueIdOrUrl)
-	if issueId == "" {
-		return toolResult{}, fmt.Errorf("Could not extract issue ID from %q. Pass a numeric ID or full issue URL.", issueIdOrUrl)
-	}
-
+func (c *SentryClient) getIssue(ctx context.Context, issueId string, includeLatestEvent bool, includeFields, excludeFields []string, grepPattern string, maxStackFrames *int) (toolResult, error) {
 	resp, err := c.request(ctx, "GET", "/issues/"+issueId+"/", nil, nil)
 	if err != nil {
 		return toolResult{}, err
 	}
-	combined := essentialIssueFields(toObject(resp.data))
-	combined["latest_event"] = nil
+	out := issueRow(toObject(resp.data))
+	out["_full"] = "issues/" + issueId + "/"
 
 	if includeLatestEvent {
-		evResp, err := c.request(ctx, "GET", "/organizations/"+c.OrgSlug+"/issues/"+issueId+"/events/latest/", nil, nil)
+		maxFrames := maxEventFrames
+		if maxStackFrames != nil {
+			maxFrames = *maxStackFrames
+		}
+		evPath := "organizations/" + c.OrgSlug + "/issues/" + issueId + "/events/latest/"
+		evResp, err := c.request(ctx, "GET", "/"+evPath, nil, nil)
 		if err != nil {
-			combined["latest_event"] = map[string]any{"_error": err.Error()}
+			out["latest_event"] = map[string]any{"_error": err.Error()}
 		} else {
 			ev := toObject(evResp.data)
-			rawEntries := toArray(ev["entries"])
-			if len(rawEntries) > 3 {
-				rawEntries = rawEntries[:3]
+			entries := toArray(ev["entries"])
+			projected := make([]any, 0, maxIssueEventEntries)
+			for _, e := range entries {
+				if len(projected) >= maxIssueEventEntries {
+					break
+				}
+				projected = append(projected, eventEntry(toObject(e), maxFrames))
 			}
-			entries := make([]any, 0, len(rawEntries))
-			for _, e := range rawEntries {
-				entries = append(entries, essentialEventEntry(toObject(e)))
+			latest := map[string]any{
+				"eventID":     pick(ev, "eventID", "id"),
+				"dateCreated": secs(ev["dateCreated"]),
+				"entries":     projected,
+				"_full":       evPath,
 			}
-			combined["latest_event"] = map[string]any{
-				"id":          ev["id"],
-				"eventID":     ev["eventID"],
-				"dateCreated": ev["dateCreated"],
-				"entries":     entries,
-				"_note":       "Event truncated. Use sentry_get_event for full data.",
+			if len(entries) > len(projected) {
+				latest["entries_omitted"] = len(entries) - len(projected)
 			}
+			out["latest_event"] = latest
 		}
 	}
 
-	var out any = combined
-	if maxStackFrames != nil {
-		out = truncateStackFrames(out, *maxStackFrames)
-	}
+	var filtered any = out
 	if len(includeFields) > 0 || len(excludeFields) > 0 {
-		out = filterFields(out, includeFields, excludeFields)
+		filtered = filterFields(filtered, includeFields, excludeFields)
 	}
 	if grepPattern != "" {
-		filtered, err := grepFilter(out, grepPattern)
+		out, err := grepRendered(ctx, filtered, grepPattern)
 		if err != nil {
 			return toolResult{}, err
 		}
-		out = filtered
+		return textResult(out), nil
 	}
-	return jsonResult(ctx, out), nil
+	return jsonResult(ctx, filtered), nil
 }
 
-func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId string, limit, offset int, entryType string) (toolResult, error) {
-	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
+func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId, issueRef string, limit, offset int, entryType string) (toolResult, error) {
+	ref, err := c.resolveEvent(ctx, projectSlug, eventId, issueRef)
 	if err != nil {
 		return toolResult{}, err
 	}
-	ev := toObject(resp.data)
+	endpoint := ref.endpoint
+	ev, err := c.fetchEvent(ctx, ref)
+	if err != nil {
+		return toolResult{}, err
+	}
 	if offset < 0 {
 		offset = 0
 	}
@@ -860,8 +934,9 @@ func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId string
 	}
 
 	out := map[string]any{
-		"id": ev["id"], "eventID": ev["eventID"], "dateCreated": ev["dateCreated"],
+		"eventID": pick(ev, "eventID", "id"), "dateCreated": secs(ev["dateCreated"]),
 		"message": ev["message"], "title": ev["title"], "platform": ev["platform"],
+		"_full": endpoint,
 	}
 
 	if entries := toArray(ev["entries"]); entries != nil {
@@ -905,7 +980,7 @@ func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId string
 
 		outEntries := make([]any, 0, len(selected))
 		for _, e := range selected {
-			outEntries = append(outEntries, essentialEventEntry(toObject(e)))
+			outEntries = append(outEntries, eventEntry(toObject(e), maxEventFrames))
 		}
 		out["entries"] = outEntries
 
@@ -918,15 +993,13 @@ func (c *SentryClient) getEvent(ctx context.Context, projectSlug, eventId string
 				availableTypes = append(availableTypes, t)
 			}
 		}
-		tip := "Showing prioritized entries. Use entryType=\"exception\" to see only stack traces."
-		if entryType != "" {
-			tip = fmt.Sprintf("Showing only %q entries. Remove entryType to see prioritized entries.", entryType)
-		}
-		out["pagination_info"] = map[string]any{
-			"total_entries":   total,
+		// Counts and the type list only. How to widen the selection is the
+		// same sentence on every call, so it is stated once in the server
+		// instructions instead of being re-sent with each response.
+		out["entries_info"] = map[string]any{
+			"total":           total,
 			"showing":         len(selected),
 			"available_types": availableTypes,
-			"tip":             tip,
 		}
 	}
 	return jsonResult(ctx, out), nil
@@ -963,19 +1036,32 @@ func (c *SentryClient) updateIssueStatus(ctx context.Context, issueId, status st
 }
 
 // assignIssue assigns the issue. assignedTo == "" unassigns.
+// assignIssue assigns the issue. assignedTo == "" unassigns.
+//
+// Sentry accepts an actor string it cannot resolve and simply leaves the issue
+// unassigned, so the response is checked rather than trusted: a request that
+// did not stick is reported as an error instead of a cheerful confirmation.
 func (c *SentryClient) assignIssue(ctx context.Context, issueId, assignedTo string) (string, error) {
 	resp, err := c.request(ctx, "PUT", "/issues/"+issueId+"/", nil, map[string]any{"assignedTo": assignedTo})
 	if err != nil {
 		return "", err
 	}
-	label := "(unassigned)"
-	if a := toObject(toObject(resp.data)["assignedTo"]); a != nil {
-		for _, k := range []string{"username", "name", "email"} {
-			if s := asString(a, k); s != "" {
-				label = s
-				break
-			}
+	assignee := toObject(toObject(resp.data)["assignedTo"])
+	label := ""
+	for _, k := range []string{"username", "name", "email", "slug"} {
+		if s := asString(assignee, k); s != "" {
+			label = s
+			break
 		}
+	}
+	if assignedTo == "" {
+		if label != "" {
+			return "", fmt.Errorf("Issue %s is still assigned to %s after an unassign request.", issueId, label)
+		}
+		return fmt.Sprintf("Issue %s assignee → (unassigned)", issueId), nil
+	}
+	if label == "" {
+		return "", fmt.Errorf("Sentry did not accept %q as an assignee — issue %s is still unassigned. Look the username up with sentry_search resource=users.", assignedTo, issueId)
 	}
 	return fmt.Sprintf("Issue %s assignee → %s", issueId, label), nil
 }
@@ -992,7 +1078,14 @@ func (c *SentryClient) mutateIssue(ctx context.Context, issueId, status string, 
 		lines = append(lines, r)
 	}
 	if assignSet {
-		r, err := c.assignIssue(ctx, issueId, assignedTo)
+		// An email or a real name is resolved to a username here, so the
+		// caller does not have to make a lookup call first to avoid a silent
+		// no-op. An ambiguous match is an error listing the candidates.
+		actor, err := c.resolveAssignee(ctx, assignedTo)
+		if err != nil {
+			return toolResult{}, err
+		}
+		r, err := c.assignIssue(ctx, issueId, actor)
 		if err != nil {
 			return toolResult{}, err
 		}
@@ -1046,134 +1139,105 @@ func (c *SentryClient) deleteComment(ctx context.Context, issueId, commentId str
 
 // ── Specialized debug tools ──────────────────────────────────────────────────
 
-func (c *SentryClient) getStackFrames(ctx context.Context, projectSlug, eventId string, inAppOnly bool, maxFrames int) (toolResult, error) {
-	resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
+func (c *SentryClient) getStackFrames(ctx context.Context, projectSlug, eventId, issueRef string, inAppOnly bool, maxFrames int) (toolResult, error) {
+	ref, err := c.resolveEvent(ctx, projectSlug, eventId, issueRef)
 	if err != nil {
 		return toolResult{}, err
 	}
-	ev := toObject(resp.data)
-	var frames []any
+	endpoint := ref.endpoint
+	ev, err := c.fetchEvent(ctx, ref)
+	if err != nil {
+		return toolResult{}, err
+	}
+	var raw []map[string]any
 	for _, e := range toArray(ev["entries"]) {
 		entry := toObject(e)
 		if asString(entry, "type") != "exception" {
 			continue
 		}
-		data := toObject(entry["data"])
-		for _, v := range toArray(data["values"]) {
-			exc := toObject(v)
-			stacktrace := toObject(exc["stacktrace"])
-			for _, f := range toArray(stacktrace["frames"]) {
+		for _, v := range toArray(toObject(entry["data"])["values"]) {
+			for _, f := range toArray(toObject(toObject(v)["stacktrace"])["frames"]) {
 				frame := toObject(f)
+				if frame == nil {
+					continue
+				}
 				inApp, _ := frame["in_app"].(bool)
 				if inAppOnly && !inApp {
 					continue
 				}
-				fn := frame["function"]
-				if fn == nil {
-					fn = frame["rawFunction"]
-				}
-				if fn == nil {
-					fn = "<unknown>"
-				}
-				filename := frame["filename"]
-				if filename == nil {
-					filename = frame["absPath"]
-				}
-				frames = append(frames, map[string]any{
-					"function":        fn,
-					"filename":        filename,
-					"lineNo":          frame["lineNo"],
-					"colNo":           frame["colNo"],
-					"inApp":           inApp,
-					"module":          frame["module"],
-					"package":         frame["package"],
-					"instructionAddr": frame["instructionAddr"],
-					"symbolAddr":      frame["symbolAddr"],
-				})
+				raw = append(raw, frame)
 			}
 		}
 	}
 	if maxFrames <= 0 {
 		maxFrames = 50
 	}
-	limited := frames
-	if len(frames) > maxFrames {
-		limited = frames[len(frames)-maxFrames:]
+	total := len(raw)
+	kept := raw
+	if total > maxFrames {
+		kept = raw[total-maxFrames:]
 	}
-	if limited == nil {
-		limited = []any{}
+
+	rows := make([]map[string]any, 0, len(kept))
+	for _, f := range kept {
+		rows = append(rows, frameRow(f))
 	}
-	return jsonResult(ctx, map[string]any{
-		"eventId":        eventId,
-		"totalFrames":    len(frames),
-		"returnedFrames": len(limited),
-		"inAppOnly":      inAppOnly,
-		"frames":         limited,
-	}), nil
+
+	extra := map[string]any{
+		"eventID":     pick(ev, "eventID", "id"),
+		"totalFrames": total,
+		"_full":       endpoint,
+	}
+	if total > len(kept) {
+		extra["frames_omitted"] = total - len(kept)
+	}
+	// Source context for the one frame a reader starts from, rather than seven
+	// lines of it on every frame — which on a long trace is most of the reply.
+	if src := frameSource(deepestInApp(kept)); src != nil {
+		extra["source"] = src
+	}
+	return jsonResult(ctx, compactTable("frames", rows, extra)), nil
 }
 
-func (c *SentryClient) checkDsymStatus(ctx context.Context, projectSlug, eventId string) (toolResult, error) {
-	var ev map[string]any
-	if eventId != "" {
-		resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/events/"+eventId+"/", nil, nil)
-		if err != nil {
-			return toolResult{}, err
-		}
-		ev = toObject(resp.data)
-	} else {
-		resp, err := c.request(ctx, "GET", "/projects/"+c.OrgSlug+"/"+projectSlug+"/issues/", map[string]any{"limit": 1}, nil)
-		if err != nil {
-			return toolResult{}, err
-		}
-		issues := toArray(resp.data)
-		if len(issues) == 0 {
-			return textResult("No recent issues found in project. Cannot check dSYM status."), nil
-		}
-		issueId := toObject(issues[0])["id"]
-		evResp, err := c.request(ctx, "GET", fmt.Sprintf("/organizations/%s/issues/%v/events/latest/", c.OrgSlug, issueId), nil, nil)
-		if err != nil {
-			return toolResult{}, err
-		}
-		ev = toObject(evResp.data)
+func (c *SentryClient) checkDsymStatus(ctx context.Context, projectSlug, eventId, issueRef string) (toolResult, error) {
+	ref, err := c.resolveEvent(ctx, projectSlug, eventId, issueRef)
+	if err != nil {
+		return toolResult{}, err
+	}
+	ev, err := c.fetchEvent(ctx, ref)
+	if err != nil {
+		return toolResult{}, err
 	}
 
-	var missing []any
+	rows := []map[string]any{}
 	for _, e := range toArray(ev["errors"]) {
 		errObj := toObject(e)
 		t := asString(errObj, "type")
-		if t == "native_missing_dsym" || t == "proguard_missing_mapping" {
-			errData := toObject(errObj["data"])
-			missing = append(missing, map[string]any{
-				"type":      errObj["type"],
-				"message":   errObj["message"],
-				"imagePath": errData["image_path"],
-				"imageUuid": errData["image_uuid"],
-				"imageName": errData["image_name"],
-			})
+		if t != "native_missing_dsym" && t != "proguard_missing_mapping" {
+			continue
 		}
+		errData := toObject(errObj["data"])
+		rows = append(rows, map[string]any{
+			"type":      errObj["type"],
+			"imageUuid": errData["image_uuid"],
+			"imageName": errData["image_name"],
+			"imagePath": errData["image_path"],
+		})
 	}
-	if missing == nil {
-		missing = []any{}
+	// count carries whether anything is missing, so no separate boolean; the
+	// command to run is kept because it is the action, not advice about it.
+	extra := map[string]any{
+		"project": firstNonEmpty(ref.project, asString(toObject(ev["project"]), "slug")),
+		"eventID": pick(ev, "eventID", "id"),
+		"_full":   ref.endpoint,
 	}
-	recommendation := "All debug symbols are present for this event."
-	if len(missing) > 0 {
-		recommendation = "Upload missing dSYM files to Sentry — sentry-cli upload-dif <path> — to see function names instead of addresses."
+	if len(rows) > 0 {
+		extra["upload"] = "sentry-cli upload-dif <path>"
 	}
-	eid := ev["eventID"]
-	if eid == nil {
-		eid = eventId
-	}
-	return jsonResult(ctx, map[string]any{
-		"project":           projectSlug,
-		"eventId":           eid,
-		"hasMissingSymbols": len(missing) > 0,
-		"missingCount":      len(missing),
-		"missingSymbols":    missing,
-		"recommendation":    recommendation,
-	}), nil
+	return jsonResult(ctx, compactTable("missingSymbols", rows, extra)), nil
 }
 
-func (c *SentryClient) rawApi(ctx context.Context, endpoint, method string, params map[string]any, body any, grepPattern string, maxChars, charOffset int) (toolResult, error) {
+func (c *SentryClient) rawApi(ctx context.Context, endpoint, method string, params map[string]any, body any, path, grepPattern string, maxChars, charOffset int, wantOutline bool) (toolResult, error) {
 	method = strings.ToUpper(method)
 	if method == "" {
 		method = "GET"
@@ -1193,55 +1257,50 @@ func (c *SentryClient) rawApi(ctx context.Context, endpoint, method string, para
 		return toolResult{}, err
 	}
 
-	var filtered any = resp.data
+	// path walks into the payload before anything is rendered, which is how a
+	// `_full` endpoint from a compact response is drilled: one subtree crosses
+	// the wire instead of the whole document.
+	data := resp.data
+	if path != "" {
+		data, err = walkPath(data, path)
+		if err != nil {
+			return toolResult{}, fmt.Errorf("path %q: %v", path, err)
+		}
+	}
+	if wantOutline {
+		return jsonResult(ctx, map[string]any{
+			"endpoint": endpoint,
+			"path":     path,
+			"shape":    outline(data, 0),
+		}), nil
+	}
 	if grepPattern != "" {
-		filtered, err = grepFilter(resp.data, grepPattern)
+		out, err := grepRendered(ctx, data, grepPattern)
 		if err != nil {
 			return toolResult{}, err
 		}
+		return pageText(out, maxChars, charOffset), nil
 	}
-	jsonStr := renderString(ctx, filtered)
+	rendered := renderString(ctx, data)
 
-	// Explicit paging takes precedence over the token-size warning. Slice on
-	// runes, not bytes, so multibyte UTF-8 (common in Sentry payloads) is never
-	// split mid-character.
+	// Explicit paging takes precedence over the size guard below.
 	if charOffset > 0 || maxChars > 0 {
-		runes := []rune(jsonStr)
-		offset := charOffset
-		if offset > len(runes) {
-			offset = len(runes)
-		}
-		limit := maxChars
-		if limit <= 0 {
-			limit = len(runes)
-		}
-		end := offset + limit
-		if end > len(runes) {
-			end = len(runes)
-		}
-		chunk := string(runes[offset:end])
-		remaining := len(runes) - end
-		suffix := ""
-		if remaining > 0 {
-			suffix = fmt.Sprintf("\n\n... (%d more chars, use charOffset=%d)", remaining, end)
-		}
-		return textResult(chunk + suffix), nil
+		return pageText(rendered, maxChars, charOffset), nil
 	}
 
-	estimatedTokens := (len(jsonStr) + 3) / 4
-	if estimatedTokens > 20000 && grepPattern == "" {
-		return textResult(strings.Join([]string{
-			fmt.Sprintf("WARNING: Response is approximately %d tokens (%d chars).", estimatedTokens, len(jsonStr)),
-			"",
-			"This endpoint returns a lot of data. Re-run with one of:",
-			"  - grepPattern=\"...\" to filter inline",
-			"  - maxChars=8000 charOffset=0 to page through",
-			"",
-			"Suggested grep patterns:",
-			"  - Stack frames: '\"function\":|\"filename\":|\"in_app\":'",
-			"  - Breadcrumbs:  '\"breadcrumbs\"'",
-			"  - Tags:         '\"tags\"'",
-		}, "\n")), nil
+	// Too large to hand over whole. Returning the shape instead of a wall of
+	// grep suggestions makes the next call a path into the part that matters.
+	if grepPattern == "" && len(rendered) > rawApiOutlineAt {
+		return jsonResult(ctx, map[string]any{
+			"endpoint": endpoint,
+			"shape":    outline(data, 0),
+			"_note": fmt.Sprintf("Response is ~%d tokens, so this is its shape, not its contents. Re-run with path=<dotted.path> for one subtree, grepPattern=<regex> to filter, or maxChars to page.",
+				(len(rendered)+3)/4),
+		}), nil
 	}
-	return textResult(jsonStr), nil
+	return textResult(rendered), nil
 }
+
+// rawApiOutlineAt is the rendered size (~20k tokens) past which sentry_raw_api
+// returns a shape sketch instead of the payload.
+const rawApiOutlineAt = 80000

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -77,16 +78,24 @@ func registerTools(srv *mcp.Server) {
 		return
 	}
 	var tools []struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		InputSchema json.RawMessage `json:"inputSchema"`
+		Name        string               `json:"name"`
+		Description string               `json:"description"`
+		InputSchema json.RawMessage      `json:"inputSchema"`
+		Annotations *mcp.ToolAnnotations `json:"annotations,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(toolsJSON), &tools); err != nil {
 		logf("tool schema parse error: %v", err)
 		return
 	}
 	for _, t := range tools {
-		srv.AddTool(&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}, toolHandler)
+		// Annotations tell the client which tools only read, so a host can stop
+		// prompting for those and gate the three that write.
+		srv.AddTool(&mcp.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+			Annotations: t.Annotations,
+		}, toolHandler)
 
 		var schema jsonschema.Schema
 		if err := json.Unmarshal(t.InputSchema, &schema); err != nil {
@@ -112,6 +121,12 @@ func requireSentry() (*SentryClient, error) {
 // toolCallTimeout caps total wall-clock for one tool call, including any
 // sequential Sentry requests and a roots/list round-trip.
 const toolCallTimeout = 60 * time.Second
+
+// instructionsTimeout bounds the discovery calls that decorate the server
+// instructions at startup. It is deliberately short: the tool list matters more
+// than the project list, and the latter degrades to nothing. A var so a test
+// can shrink it rather than sleep for it.
+var instructionsTimeout = 5 * time.Second
 
 var errUnknownTool = fmt.Errorf("unknown tool")
 
@@ -200,16 +215,17 @@ func runTool(ctx context.Context, req *mcp.CallToolRequest, c *SentryClient, nam
 		case "users":
 			return c.listUsers(ctx, argString(args, "query"), argInt(args, "limit"), argString(args, "cursor"))
 		default:
-			projectSlug := argString(args, "projectSlug")
-			if projectSlug == "" {
-				return toolResult{}, fmt.Errorf("projectSlug (or project) is required for resource=issues.")
-			}
-			return c.listIssues(ctx, projectSlug, argString(args, "query"), argString(args, "status"), argInt(args, "limit"), argString(args, "cursor"))
+			// No projectSlug searches the whole organization rather than failing.
+			return c.listIssues(ctx, argString(args, "projectSlug"), argString(args, "query"), argString(args, "status"), argInt(args, "limit"), argString(args, "cursor"))
 		}
 
 	case "sentry_get_issue":
+		issueId, err := c.resolveIssueId(ctx, argString(args, "issueIdOrUrl"))
+		if err != nil {
+			return toolResult{}, err
+		}
 		return c.getIssue(ctx,
-			argString(args, "issueIdOrUrl"),
+			issueId,
 			argBool(args, "includeLatestEvent"),
 			argStrSlice(args, "includeFields"),
 			argStrSlice(args, "excludeFields"),
@@ -218,15 +234,22 @@ func runTool(ctx context.Context, req *mcp.CallToolRequest, c *SentryClient, nam
 		)
 
 	case "sentry_get_event":
-		projectSlug := argString(args, "projectSlug")
-		if projectSlug == "" {
-			return toolResult{}, fmt.Errorf("projectSlug (or project) is required.")
-		}
-		return c.getEvent(ctx, projectSlug, argString(args, "eventId"), argInt(args, "limit"), argInt(args, "offset"), argString(args, "entryType"))
+		return c.getEvent(ctx,
+			argString(args, "projectSlug"),
+			argString(args, "eventId"),
+			issueRefArg(args),
+			argInt(args, "limit"),
+			argInt(args, "offset"),
+			argString(args, "entryType"),
+		)
 
 	case "sentry_mutate_issue":
+		issueId, err := c.resolveIssueId(ctx, issueRefArg(args))
+		if err != nil {
+			return toolResult{}, err
+		}
 		return c.mutateIssue(ctx,
-			argString(args, "issueId"),
+			issueId,
 			argString(args, "status"), has(args, "status"),
 			argString(args, "assignedTo"), has(args, "assignedTo"),
 			argString(args, "comment"),
@@ -237,7 +260,10 @@ func runTool(ctx context.Context, req *mcp.CallToolRequest, c *SentryClient, nam
 		if action == "" {
 			action = "add"
 		}
-		issueId := argString(args, "issueId")
+		issueId, err := c.resolveIssueId(ctx, issueRefArg(args))
+		if err != nil {
+			return toolResult{}, err
+		}
 		commentId := argString(args, "commentId")
 		body := argString(args, "body")
 		switch action {
@@ -263,18 +289,20 @@ func runTool(ctx context.Context, req *mcp.CallToolRequest, c *SentryClient, nam
 		}
 
 	case "sentry_stack_frames":
-		projectSlug := argString(args, "projectSlug")
-		if projectSlug == "" {
-			return toolResult{}, fmt.Errorf("projectSlug (or project) is required.")
-		}
-		return c.getStackFrames(ctx, projectSlug, argString(args, "eventId"), argBool(args, "inAppOnly"), argInt(args, "maxFrames"))
+		return c.getStackFrames(ctx,
+			argString(args, "projectSlug"),
+			argString(args, "eventId"),
+			issueRefArg(args),
+			argBool(args, "inAppOnly"),
+			argInt(args, "maxFrames"),
+		)
 
 	case "sentry_check_dsym":
-		projectSlug := argString(args, "projectSlug")
-		if projectSlug == "" {
-			return toolResult{}, fmt.Errorf("projectSlug (or project) is required.")
-		}
-		return c.checkDsymStatus(ctx, projectSlug, argString(args, "eventId"))
+		return c.checkDsymStatus(ctx,
+			argString(args, "projectSlug"),
+			argString(args, "eventId"),
+			issueRefArg(args),
+		)
 
 	case "sentry_raw_api":
 		var params map[string]any
@@ -286,14 +314,28 @@ func runTool(ctx context.Context, req *mcp.CallToolRequest, c *SentryClient, nam
 			argString(args, "method"),
 			params,
 			args["body"],
+			argString(args, "path"),
 			argString(args, "grepPattern"),
 			argInt(args, "maxChars"),
 			argInt(args, "charOffset"),
+			argBool(args, "outline"),
 		)
 
 	default:
 		return toolResult{}, errUnknownTool
 	}
+}
+
+// issueRefArg reads an issue reference under any of the names the tools use for
+// it, so a caller that says issueId where the schema says issueIdOrUrl (or the
+// reverse) is understood rather than rejected.
+func issueRefArg(args map[string]any) string {
+	for _, k := range []string{"issueIdOrUrl", "issueId", "issue", "shortId"} {
+		if s := strings.TrimSpace(argString(args, k)); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // normalizeArgs maps the `project` alias onto `projectSlug`.
@@ -379,7 +421,24 @@ func buildInstructions(config Config) string {
 		return b.String()
 	}
 
-	me := sentry.whoami(context.Background())
+	// These two calls decorate the instructions with the caller's identity and
+	// the project list. They run before the transport starts, so an unreachable
+	// or slow Sentry must not hold the tool list hostage: they go out together
+	// under one short deadline, and past it the server starts with whatever
+	// came back. Previously they ran sequentially on an unbounded context, so a
+	// stalled instance could leave a GUI client looking hung for a minute.
+	discoverCtx, cancel := context.WithTimeout(context.Background(), instructionsTimeout)
+	defer cancel()
+
+	var (
+		me       *identity
+		projects []projectInfo
+		wg       sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); me = sentry.whoami(discoverCtx) }()
+	go func() { defer wg.Done(); projects = sentry.fetchProjects(discoverCtx, 20) }()
+	wg.Wait()
 
 	w("## Configured instance")
 	w("- URL:  " + config.Sentry.URL)
@@ -396,7 +455,7 @@ func buildInstructions(config Config) string {
 		w("- You:  " + ident + suffix)
 	}
 
-	if projects := sentry.fetchProjects(context.Background(), 20); len(projects) > 0 {
+	if len(projects) > 0 {
 		w("")
 		w(fmt.Sprintf("## Projects (top %d)", len(projects)))
 		for _, p := range projects {
@@ -415,11 +474,32 @@ func buildInstructions(config Config) string {
 	w("")
 	w("## Use these tools — do NOT guess")
 	w("- \"what am I working on / show me the context\" → call `sentry_get_dev_context` first.")
-	w("- Looking up a person's username (for `assignedTo`) → ALWAYS use `sentry_search resource=users`. NEVER guess from git authors or email prefixes — the wrong username silently breaks `sentry_mutate_issue`.")
-	w("- Reading an issue → `sentry_get_issue`. Stack traces only → `sentry_stack_frames`. Full event → `sentry_get_event`.")
+	w("- Reading an issue → `sentry_get_issue`. Stack traces only → `sentry_stack_frames`. Full event → `sentry_get_event`. All three take a numeric ID, a short ID (`PROJECT-ABC`), or an issue URL.")
+	w("- A stack trace for an issue is one call: `sentry_stack_frames issueIdOrUrl=<ref>` reads that issue's latest event. Same for `sentry_get_event` and `sentry_check_dsym` — no project slug or event ID needed.")
+	w("- Assigning → `sentry_mutate_issue assignedTo=<username|email|name|team:slug>`. It resolves the actor itself, errors with candidates when a name is ambiguous, and errors rather than reporting success if the assignment does not stick. `sentry_search resource=users` is for browsing who exists, not a prerequisite.")
 	w("- Mutating an issue → `sentry_mutate_issue`. Comments → `sentry_comment`.")
 	w("- Missing iOS/macOS/Android symbols → `sentry_check_dsym` returns the UUIDs to upload.")
-	w("- Anything else → `sentry_raw_api`. Always pass `grepPattern` or `maxChars`/`charOffset` for endpoints that may return large events.")
+	w("- Anything else → `sentry_raw_api`. Pass `path`, `grepPattern`, or `maxChars`/`charOffset` for endpoints that may return large events.")
+	w("")
+	w("## Issue search")
+	w("`sentry_search` with no `projectSlug` searches the whole organization; pass one to scope to a project. Query syntax:")
+	w("- `is:unresolved` / `is:resolved` / `is:ignored`, `assigned:me`, `assigned:<username>`, `is:unassigned`")
+	w("- `environment:production`, `release:1.2.3`, `firstRelease:latest`, `level:error`")
+	w("- `timesSeen:>100`, `firstSeen:-24h`, `lastSeen:+1h`, `age:-1d`")
+	w("- free text matches the title; combine terms with a space (AND), and sort with `sort:` (`date`, `new`, `freq`, `user`)")
+	w("")
+	w("## Reading these responses")
+	w("Responses are projected for compactness, so they are not shaped like raw Sentry JSON. This section is the whole convention — it is not repeated in each response.")
+	w("- Lists come back as a table: one header naming the columns, then one line per row.")
+	w("- `_all` carries the columns whose value is the same for every row in that response. Read them as though they were on each row.")
+	w("- A column that is null for every row is dropped from the response, so a missing column means \"not set on any of these\", not \"does not exist\".")
+	w("- Timestamps are ISO-8601 to the second. `count` on a list is the number of rows returned; `next_cursor`, when present, pages.")
+	w("- `permalink` is never returned — build a link from the id:")
+	w("  - issue: " + config.Sentry.URL + "/organizations/" + config.Sentry.Org + "/issues/<id>/")
+	w("  - event: " + config.Sentry.URL + "/organizations/" + config.Sentry.Org + "/issues/<issueId>/events/<eventId>/")
+	w("- `_full` is the `sentry_raw_api` endpoint holding the complete, unprojected payload for that response. To recover anything a projection dropped, call `sentry_raw_api` with that endpoint plus `path=<dotted.path>`; add `outline=true` first to see the shape and pick a path. Numeric path segments index arrays.")
+	w("- Stack traces carry `source` — the source window for the deepest in-app frame — instead of context lines on every frame. `frames_omitted` counts what the frame cap dropped; `sentry_stack_frames maxFrames=` or the `_full` endpoint gets the rest.")
+	w("- `sentry_get_event` reports `entries_info.available_types`. Pass `entryType=<type>` for one kind of entry, or `limit`/`offset` to page through them.")
 	w("")
 	b.WriteString("IMPORTANT: do NOT resolve, ignore, or reassign issues without an explicit user instruction. Read tools are safe; mutation tools are not.")
 
