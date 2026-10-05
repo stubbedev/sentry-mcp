@@ -83,7 +83,7 @@ Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONF
 
 ### 2. Install
 
-The same server is published to both **npm** ([`@stubbedev/sentry-mcp`](https://www.npmjs.com/package/@stubbedev/sentry-mcp)) and **Composer** ([`stubbedev/sentry-mcp`](https://packagist.org/packages/stubbedev/sentry-mcp)). Both are thin launchers: on first run they download the prebuilt Go binary for your platform from the matching GitHub release and hand stdio to it, so neither needs Go.
+The same server is published to both **npm** ([`@stubbedev/sentry-mcp`](https://www.npmjs.com/package/@stubbedev/sentry-mcp)) and **Composer** ([`stubbedev/sentry-mcp`](https://packagist.org/packages/stubbedev/sentry-mcp)). Both fetch the prebuilt Go binary for your platform from the matching GitHub release, so neither needs Go: npm through a thin launcher, Composer at install time.
 
 **npm** (Node 24+):
 
@@ -96,11 +96,13 @@ npm install --save-dev @stubbedev/sentry-mcp    # per project: node_modules/.bin
 **Composer** (PHP 8.1+):
 
 ```bash
-composer global require stubbedev/sentry-mcp    # global: $(composer global config bin-dir --absolute)/sentry-mcp
-composer require --dev stubbedev/sentry-mcp     # per project: vendor/bin/sentry-mcp
+composer global require stubbedev/sentry-mcp    # global: $(composer global config home)/vendor/stubbedev/sentry-mcp/bin/sentry-mcp-native
+composer require --dev stubbedev/sentry-mcp     # per project: vendor/stubbedev/sentry-mcp/bin/sentry-mcp-native
 ```
 
-Composer does not run install scripts for dependencies, so the binary is downloaded the first time `sentry-mcp` starts rather than at install time. With the `pcntl` extension (standard on Linux/macOS CLI builds) the launcher execs the binary and exits; without it, one idle PHP process stays behind for the session.
+The Composer package is a Composer plugin: on `composer install` / `update` it downloads the binary for your OS and architecture to `vendor/stubbedev/sentry-mcp/bin/sentry-mcp-native` (`sentry-mcp-native.exe` on Windows), and your MCP client runs that directly, with no PHP at runtime. Composer asks once whether to trust the plugin; for non-interactive installs, allow it up front with `composer config allow-plugins.stubbedev/sentry-mcp true` (or `composer global config ...`). Set `SENTRY_MCP_SKIP_DOWNLOAD=1` to skip the install-time download.
+
+If you declined the plugin, the PHP launcher `vendor/bin/sentry-mcp` downloads the binary on its first run instead. With the `pcntl` extension (standard on Linux/macOS CLI builds) it execs the binary and exits; without it, one idle PHP process stays behind for the session.
 
 Every client example below uses `npx`. To use another install, swap only the command:
 
@@ -110,7 +112,7 @@ Every client example below uses `npx`. To use another install, swap only the com
 | npm global | `sentry-mcp` | — |
 | npm per project | `node_modules/.bin/sentry-mcp` | — |
 | Composer global | `sentry-mcp` (with Composer's bin dir on `PATH`) | — |
-| Composer per project | `vendor/bin/sentry-mcp` | — |
+| Composer per project | `vendor/stubbedev/sentry-mcp/bin/sentry-mcp-native` | — |
 | `go install` / release binary / Nix | `sentry-mcp`, or its absolute path | — |
 
 GUI clients (Claude Desktop, Cursor launched from the dock, and so on) do not inherit your shell's `PATH` or working directory, so give them an **absolute** `command` path — see [Claude Desktop](#claude-desktop).
@@ -150,7 +152,7 @@ For a PHP project that has `stubbedev/sentry-mcp` in `require-dev`, commit a pro
 {
   "mcpServers": {
     "sentry": {
-      "command": "vendor/bin/sentry-mcp"
+      "command": "vendor/stubbedev/sentry-mcp/bin/sentry-mcp-native"
     }
   }
 }
@@ -708,5 +710,5 @@ Layout:
 - `config.go` — config resolution (`--config` / env / file / XDG)
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`
 - `bin/cli.mjs` + `scripts/` — npm wrapper (downloads + execs the binary)
-- `bin/sentry-mcp` + `composer.json` — Composer wrapper, the PHP twin of `bin/cli.mjs`
+- `src/ComposerPlugin.php` + `src/Binary.php` + `bin/sentry-mcp` + `composer.json` — Composer plugin that fetches the binary at install time, plus the PHP launcher (the twin of `bin/cli.mjs`) that fetches it on first run when the plugin is not allowed
 - `flake.nix` — Nix package / app / dev shell

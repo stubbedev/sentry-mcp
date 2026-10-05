@@ -1,101 +1,27 @@
 #!/usr/bin/env php
 <?php
-// Composer launcher. The PHP twin of bin/cli.mjs: resolves (and, on first run,
-// downloads) the prebuilt Go binary for this platform from the GitHub release
-// matching package.json's version, then hands stdio to it.
+// Composer launcher: the PHP twin of bin/cli.mjs. The Composer plugin
+// (src/ComposerPlugin.php) normally fetches the native binary at install time;
+// this fetches it on first run when the plugin was not allowed to, then hands
+// stdio to it.
 //
-// Composer runs no install scripts for dependencies, so the download happens
-// here rather than at install time. With ext-pcntl the launcher execs the
-// binary and disappears; without it the binary inherits the real stdin/stdout,
-// so the idle PHP parent adds no per-message latency, only relays the exit code.
+// MCP clients can point at the native binary directly to skip PHP entirely.
+// Through this launcher, pcntl replaces the PHP process with the binary; without
+// pcntl (Windows, minimal PHP builds) the binary runs as a child that inherits
+// the real stdin/stdout, so there is still no per-message relaying.
 
 declare(strict_types=1);
 
-const REPO = 'stubbedev/sentry-mcp';
+// Loaded by path rather than the autoloader so a global install works too.
+require_once dirname(__DIR__) . '/src/Binary.php';
 
-function fail(string $msg): never
-{
-    fwrite(STDERR, "[sentry-mcp] {$msg}\n");
+try {
+    $bin = Stubbedev\SentryMcp\Binary::ensure();
+} catch (Throwable $e) {
+    fwrite(STDERR, "[sentry-mcp] {$e->getMessage()}\n");
     exit(1);
 }
 
-// Map PHP's OS family and machine type onto the Go release asset naming. Mirrors
-// PLATFORMS in scripts/download.mjs.
-function target(): array
-{
-    $os = match (PHP_OS_FAMILY) {
-        'Linux' => 'linux',
-        'Darwin' => 'darwin',
-        'Windows' => 'windows',
-        'BSD' => str_contains(strtolower(PHP_OS), 'freebsd') ? 'freebsd' : null,
-        default => null,
-    };
-    $machine = strtolower(php_uname('m'));
-    $arch = match (true) {
-        in_array($machine, ['x86_64', 'amd64', 'x64'], true) => 'amd64',
-        in_array($machine, ['aarch64', 'arm64'], true) => 'arm64',
-        str_starts_with($machine, 'armv7') => 'arm',
-        in_array($machine, ['i386', 'i586', 'i686', 'x86'], true) => '386',
-        $machine === 'ppc64le' => 'ppc64le',
-        $machine === 's390x' => 's390x',
-        $machine === 'riscv64' => 'riscv64',
-        default => null,
-    };
-    $supported = [
-        'linux' => ['amd64', 'arm64', 'arm', '386', 'ppc64le', 's390x', 'riscv64'],
-        'darwin' => ['amd64', 'arm64'],
-        'windows' => ['amd64', 'arm64', '386'],
-        'freebsd' => ['amd64', 'arm64'],
-    ];
-    if ($os === null || $arch === null || !in_array($arch, $supported[$os], true)) {
-        fail(sprintf(
-            'Unsupported platform %s/%s. Build from source with: go install github.com/%s@latest',
-            PHP_OS, $machine, REPO,
-        ));
-    }
-    return [$os, $arch, $os === 'windows' ? '.exe' : ''];
-}
-
-function ensureBinary(): string
-{
-    $root = dirname(__DIR__);
-    [$os, $arch, $ext] = target();
-    $dest = "{$root}/bin/sentry-mcp-native{$ext}";
-    if (is_file($dest) && filesize($dest) > 0) {
-        return $dest;
-    }
-
-    // package.json is the single version source: the flake, npm and the binary
-    // itself all read it, and publish.yml refuses a tag that disagrees with it.
-    $pkg = json_decode((string) @file_get_contents("{$root}/package.json"), true);
-    $version = $pkg['version'] ?? fail("cannot read version from {$root}/package.json");
-
-    $url = sprintf('https://github.com/%s/releases/download/v%s/sentry-mcp_%s_%s%s', REPO, $version, $os, $arch, $ext);
-    $ctx = stream_context_create(['http' => [
-        'follow_location' => 1,
-        'user_agent' => 'sentry-mcp-composer',
-        'timeout' => 60,
-    ]]);
-    $in = @fopen($url, 'rb', false, $ctx);
-    if ($in === false) {
-        fail("Failed to download {$url}: " . (error_get_last()['message'] ?? 'unknown error'));
-    }
-    $tmp = "{$dest}.download";
-    $out = @fopen($tmp, 'wb') ?: fail("cannot write {$tmp}");
-    $copied = stream_copy_to_stream($in, $out);
-    fclose($in);
-    fclose($out);
-    if (!$copied) {
-        @unlink($tmp);
-        fail("Failed to download {$url}: empty response");
-    }
-    @chmod($tmp, 0755);
-    @unlink($dest);
-    rename($tmp, $dest) || fail("cannot move {$tmp} to {$dest}");
-    return $dest;
-}
-
-$bin = ensureBinary();
 $args = array_slice($_SERVER['argv'] ?? [], 1);
 
 if (function_exists('pcntl_exec')) {
@@ -103,8 +29,9 @@ if (function_exists('pcntl_exec')) {
     // Only reached when exec failed; fall through to proc_open.
 }
 
-$proc = proc_open([$bin, ...$args], [STDIN, STDOUT, STDERR], $pipes);
+$proc = proc_open(array_merge([$bin], $args), [STDIN, STDOUT, STDERR], $pipes, null, null, ['bypass_shell' => true]);
 if (!is_resource($proc)) {
-    fail("failed to start {$bin}");
+    fwrite(STDERR, "[sentry-mcp] failed to start binary {$bin}\n");
+    exit(1);
 }
 exit(proc_close($proc));
