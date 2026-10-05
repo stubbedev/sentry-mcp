@@ -25,6 +25,12 @@ jobs:
       - name: Build
         run: go build -o sentry-mcp .
 
+      - name: Composer — validate package + lint launcher
+        # PHP and Composer ship on ubuntu-latest, so no setup step is needed.
+        run: |
+          composer validate --strict
+          php -l bin/sentry-mcp
+
       - name: Bundle — pack + validate .mcpb
         run: |
           # Catches a manifest template typo on PR instead of on tag day.

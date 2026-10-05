@@ -1,0 +1,28 @@
+{
+    "name": "stubbedev/sentry-mcp",
+    "description": "MCP server for self-hosted Sentry (Go, distributed as a prebuilt binary)",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "mcp",
+        "sentry",
+        "model-context-protocol",
+        "ai",
+        "llm"
+    ],
+    "homepage": "https://github.com/stubbedev/sentry-mcp",
+    "support": {
+        "issues": "https://github.com/stubbedev/sentry-mcp/issues",
+        "source": "https://github.com/stubbedev/sentry-mcp"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-openssl": "*"
+    },
+    "suggest": {
+        "ext-pcntl": "Replaces the PHP launcher with the native binary (execve) instead of keeping an idle PHP process for the session"
+    },
+    "bin": [
+        "bin/sentry-mcp"
+    ]
+}

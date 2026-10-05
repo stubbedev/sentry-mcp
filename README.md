@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for **self-hosted Sentry**, written in Go. Exposes tools for natural-language workflows around issues, events, stack traces, and debug-symbol triage.
 
-Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Run it five interchangeable ways — a one-click Claude Desktop bundle, `npx`, `go install`, a prebuilt release binary, or the Nix flake — and structured responses are [projected and serialized as TOON](#compact-responses) — ~26% of the tokens of the raw nested JSON, with `_full` on every response to fetch back anything that was trimmed.
+Ships as a single static binary (stdlib + one small Go dependency) with a fast cold start and a tiny footprint. Install it whichever way fits your stack — **npm** (`npx`), **Composer**, a one-click Claude Desktop bundle, `go install`, a prebuilt release binary, or the Nix flake — and structured responses are [projected and serialized as TOON](#compact-responses) — ~26% of the tokens of the raw nested JSON, with `_full` on every response to fetch back anything that was trimmed.
 
 > **Note:** This server targets self-hosted Sentry installs. It will also work against sentry.io, but the official Sentry MCP is a better fit there.
 
@@ -81,17 +81,52 @@ SENTRY_ORG_SLUG=your-org-slug
 
 Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONFIG` env var → `~/.sentry-mcp.json` → `$XDG_CONFIG_HOME/sentry-mcp/config.json` (defaults to `~/.config/sentry-mcp/config.json`) → `.sentry-mcp.json` in cwd → environment variables. A leading `~` in `--config` / `SENTRY_MCP_CONFIG` is expanded by the server, so it also works when a GUI client launches it without a shell.
 
-### 2. Connect to your AI tool
+### 2. Install
+
+The same server is published to both **npm** ([`@stubbedev/sentry-mcp`](https://www.npmjs.com/package/@stubbedev/sentry-mcp)) and **Composer** ([`stubbedev/sentry-mcp`](https://packagist.org/packages/stubbedev/sentry-mcp)). Both are thin launchers: on first run they download the prebuilt Go binary for your platform from the matching GitHub release and hand stdio to it, so neither needs Go.
+
+**npm** (Node 24+):
+
+```bash
+npx -y @stubbedev/sentry-mcp@latest             # no install, always the newest release
+npm install -g @stubbedev/sentry-mcp            # global: puts `sentry-mcp` on your PATH
+npm install --save-dev @stubbedev/sentry-mcp    # per project: node_modules/.bin/sentry-mcp
+```
+
+**Composer** (PHP 8.1+):
+
+```bash
+composer global require stubbedev/sentry-mcp    # global: $(composer global config bin-dir --absolute)/sentry-mcp
+composer require --dev stubbedev/sentry-mcp     # per project: vendor/bin/sentry-mcp
+```
+
+Composer does not run install scripts for dependencies, so the binary is downloaded the first time `sentry-mcp` starts rather than at install time. With the `pcntl` extension (standard on Linux/macOS CLI builds) the launcher execs the binary and exits; without it, one idle PHP process stays behind for the session.
+
+Every client example below uses `npx`. To use another install, swap only the command:
+
+| Install | `command` | `args` before the server flags |
+|---|---|---|
+| npx | `npx` | `-y`, `@stubbedev/sentry-mcp@latest` |
+| npm global | `sentry-mcp` | — |
+| npm per project | `node_modules/.bin/sentry-mcp` | — |
+| Composer global | `sentry-mcp` (with Composer's bin dir on `PATH`) | — |
+| Composer per project | `vendor/bin/sentry-mcp` | — |
+| `go install` / release binary / Nix | `sentry-mcp`, or its absolute path | — |
+
+GUI clients (Claude Desktop, Cursor launched from the dock, and so on) do not inherit your shell's `PATH` or working directory, so give them an **absolute** `command` path — see [Claude Desktop](#claude-desktop).
+
+### 3. Connect to your AI tool
 
 #### Which run method should I use?
 
 | Method | Best for | Trade-off |
 |---|---|---|
 | **`.mcpb` bundle** | [Claude Desktop](#claude-desktop) — double-click install, credentials entered in a dialog | Claude Desktop only; update by installing the next release's bundle |
-| **`go install` / prebuilt binary / Nix** | Lowest overhead — the MCP client execs the native binary directly, **no Node process** | You manage updates (re-run `go install`, or `nix run` re-resolves on each launch) |
+| **`go install` / prebuilt binary / Nix** | Lowest overhead — the MCP client execs the native binary directly, **no Node or PHP process** | You manage updates (re-run `go install`, or `nix run` re-resolves on each launch) |
 | **`npx @latest`** | Easiest, zero install, always the newest version | Auto-downloads the matching binary, but leaves one small idle Node process for the session (zero per-call latency — stdio is inherited) |
+| **Composer** | PHP projects — pin the version in `composer.json`/`composer.lock` next to the rest of your tooling and share one `.mcp.json` with the team | Updates with `composer update`; needs PHP 8.1+ |
 
-**Recommendation:** for day-to-day use point your client at the native binary (`go install` or Nix) for the leanest process; reach for `npx` when you want zero setup or pinned auto-updates. All the client configs below are interchangeable — swap the `command`/`args` for whichever method you picked.
+**Recommendation:** for day-to-day use point your client at the native binary (`go install` or Nix) for the leanest process; reach for `npx` when you want zero setup or pinned auto-updates, and Composer when the repo you work in is a PHP project. All the client configs below are interchangeable — swap the `command`/`args` for whichever method you picked.
 
 > Note: with `npx`, `--prefer-online` can break MCP startup in some clients. Keep the command simple and use the [update steps](#updating-existing-installs) when you want to refresh.
 
@@ -100,8 +135,29 @@ Config is resolved in this order: `--config <path>` CLI arg → `SENTRY_MCP_CONF
 #### Claude Code
 
 ```bash
+# npm
 claude mcp add sentry -- npx -y @stubbedev/sentry-mcp@latest --config ~/.sentry-mcp.json
+
+# Composer (global)
+claude mcp add sentry -- sentry-mcp --config ~/.sentry-mcp.json
 ```
+
+For a PHP project that has `stubbedev/sentry-mcp` in `require-dev`, commit a project-scoped
+`.mcp.json` so everyone on the team gets the server pinned to the version in `composer.lock`
+(Claude Code starts it from the project root, so the relative path resolves):
+
+```json
+{
+  "mcpServers": {
+    "sentry": {
+      "command": "vendor/bin/sentry-mcp"
+    }
+  }
+}
+```
+
+The same file with `"command": "npx", "args": ["-y", "@stubbedev/sentry-mcp@latest"]` does the
+job for an npm project. Credentials then come from each developer's `~/.sentry-mcp.json`.
 
 ---
 
@@ -144,7 +200,10 @@ path** (a bare `npx` fails with `spawn npx ENOENT`), and a `.env` file or a rela
 ```
 
 To keep `npx`, set `command` to the absolute path of your launcher (`which npx`, e.g.
-`/opt/homebrew/bin/npx`) with `"args": ["-y", "@stubbedev/sentry-mcp@latest"]`.
+`/opt/homebrew/bin/npx`) with `"args": ["-y", "@stubbedev/sentry-mcp@latest"]`. For a Composer
+global install, use the absolute path of the proxy, e.g.
+`/Users/you/.composer/vendor/bin/sentry-mcp` (`composer global config bin-dir --absolute`
+prints the directory).
 
 Server stderr is logged to `~/Library/Logs/Claude/mcp-server-sentry.log` (macOS) or
 `%APPDATA%\Claude\logs\mcp-server-sentry.log` (Windows) — read that first when a
@@ -232,7 +291,8 @@ Set `"type": "remote"` with `"url"` and `"headers"` to point at a shared
 One command — it writes the config all three read:
 
 ```bash
-codex mcp add sentry -- npx -y @stubbedev/sentry-mcp@latest
+codex mcp add sentry -- npx -y @stubbedev/sentry-mcp@latest   # npm
+codex mcp add sentry -- sentry-mcp                            # Composer (global)
 ```
 
 Or edit `~/.codex/config.toml` directly (`.codex/config.toml` in a trusted project for a
@@ -259,7 +319,11 @@ streamable HTTP — so a shared [HTTP server](#http-transport-behind-a-proxy) is
 #### VS Code / GitHub Copilot
 
 ```bash
+# npm
 code --add-mcp '{"name":"sentry","command":"npx","args":["-y","@stubbedev/sentry-mcp@latest"]}'
+
+# Composer (global)
+code --add-mcp '{"name":"sentry","command":"sentry-mcp"}'
 ```
 
 Or commit `.vscode/mcp.json` with a `servers` object of the same shape to share it with the
@@ -440,10 +504,14 @@ curl -s -X POST http://127.0.0.1:8765/mcp -H "Mcp-Session-Id: $SID" \
 If your MCP client is already configured and you want the newest package version:
 
 ```bash
-npx clear-npx-cache
+npx clear-npx-cache                             # npx
+npm update -g @stubbedev/sentry-mcp             # npm global
+composer global update stubbedev/sentry-mcp     # Composer global
+composer update stubbedev/sentry-mcp            # Composer per project
 ```
 
-Then restart your MCP client.
+Then restart your MCP client. Each update replaces the package directory, so the launcher
+fetches the new release's binary on the next start.
 
 ---
 
@@ -457,7 +525,7 @@ cd sentry-mcp
 go build -o sentry-mcp .
 ```
 
-Then use `/path/to/sentry-mcp/sentry-mcp` instead of the `npx` command in the configs above.
+Then use `/path/to/sentry-mcp/sentry-mcp` instead of the `npx` or Composer command in the configs above.
 
 ---
 
@@ -555,7 +623,7 @@ A response over ~20K tokens comes back as a shape sketch instead of its contents
 
 ## Releases (Maintainers)
 
-Each release ships **both** prebuilt Go binaries (attached to the GitHub release) and the npm wrapper `@stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — packs six of them into `.mcpb` bundles for one-click Claude Desktop install (darwin/windows/linux × amd64/arm64), attaches everything to the GitHub release, then publishes the npm package.
+Each release ships prebuilt Go binaries (attached to the GitHub release), the npm wrapper `@stubbedev/sentry-mcp`, and the Composer wrapper `stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — packs six of them into `.mcpb` bundles for one-click Claude Desktop install (darwin/windows/linux × amd64/arm64), attaches everything to the GitHub release, then publishes the npm package.
 
 Bundle sources live in `packaging/mcpb/` (`manifest.template.json`, `icon.png`, `pack.sh`). CI packs and validates one bundle on every run, so a manifest typo fails on the PR. `npm run bundle` builds one for the host platform into `dist/`.
 
@@ -576,12 +644,14 @@ git commit -am "0.2.2" && git tag v0.2.2 && git push origin HEAD --follow-tags
 The publish workflow verifies that `package.json` version matches the tag before publishing.
 
 - The npm step uses npm Trusted Publisher (OIDC), so no `NPM_TOKEN` secret is required
+- **Composer needs no publish step**: Packagist reads `composer.json` and the `vX.Y.Z` tags straight from GitHub. `composer.json` deliberately has no `version` field — the tag is the version, and the launcher reads the binary version from `package.json` at that tag, which `publish.yml` has already checked against the tag
 - The release step uses the default `GITHUB_TOKEN`
 - The **Nix flake auto-tracks releases**: `flake.nix` reads its `version` from `package.json`, so bumping the version updates the flake too. The `Flake` workflow (`.github/workflows/flake.yml`) recomputes `vendorHash` on any change to `go.mod`/`go.sum`/sources and commits it back, so `nix build` always works against `master`.
 
-Required npm setup (one-time):
+Required setup (one-time):
 
-- In npm package settings, add this GitHub repo/workflow as a Trusted Publisher
+- npm: in the package settings, add this GitHub repo/workflow as a Trusted Publisher
+- Packagist: submit `https://github.com/stubbedev/sentry-mcp` at [packagist.org/packages/submit](https://packagist.org/packages/submit), then enable the GitHub integration (or add the Packagist webhook to the repo) so new tags appear without a manual update
 
 ---
 
@@ -638,4 +708,5 @@ Layout:
 - `config.go` — config resolution (`--config` / env / file / XDG)
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`
 - `bin/cli.mjs` + `scripts/` — npm wrapper (downloads + execs the binary)
+- `bin/sentry-mcp` + `composer.json` — Composer wrapper, the PHP twin of `bin/cli.mjs`
 - `flake.nix` — Nix package / app / dev shell
