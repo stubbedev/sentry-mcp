@@ -23,7 +23,7 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        sentry-mcp = pkgs.buildGoModule {
+        sentry-mcp = pkgs.buildGo127Module {
           pname = "sentry-mcp";
           inherit version;
           src = self;
@@ -58,7 +58,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.go pkgs.gopls pkgs.gotools ];
+          packages = [ pkgs.go_1_27 pkgs.gopls pkgs.gotools ];
         };
       });
 
