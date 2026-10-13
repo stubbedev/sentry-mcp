@@ -7,7 +7,7 @@ toolchain go1.27.2
 require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/toon-format/toon-go v0.0.0-20251202084852-7ca0e27c4e8c
+	github.com/toon-format/toon-go v1.0.1
 )
 
 require (
