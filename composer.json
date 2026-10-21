@@ -22,7 +22,7 @@
     },
     "suggest": {
         "ext-curl": "Downloads the binary; without it allow_url_fopen + openssl are used",
-        "ext-pcntl": "Lets bin/sentry-mcp replace itself with the native binary (execve) instead of keeping an idle PHP process for the session"
+        "ext-pcntl": "Lets bin/sentry-mcp exec the binary in place instead of running it as a child"
     },
     "bin": [
         "bin/sentry-mcp"

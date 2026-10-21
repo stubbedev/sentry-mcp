@@ -104,6 +104,8 @@ The Composer package is a Composer plugin: on `composer install` / `update` it d
 
 If you declined the plugin, the PHP launcher `vendor/bin/sentry-mcp` downloads the binary on its first run instead. With the `pcntl` extension (standard on Linux/macOS CLI builds) it execs the binary and exits; without it, one idle PHP process stays behind for the session.
 
+npm and Composer download each release's binary once per user, into `$XDG_CACHE_HOME/sentry-mcp/<version>/` (by default `~/.cache` on Linux and FreeBSD, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), and hardlink it into every install, or copy it where the install is on another filesystem. Further projects and git worktrees on the same version install without downloading anything. Delete old version directories to reclaim their space; installs keep their own link.
+
 Every client example below uses `npx`. To use another install, swap only the command:
 
 | Install | `command` | `args` before the server flags |

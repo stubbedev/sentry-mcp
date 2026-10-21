@@ -5,8 +5,7 @@ node_modules/
 dist/
 /sentry-mcp
 /sentry-mcp.exe
-bin/sentry-mcp-native
-bin/sentry-mcp-native.exe
+bin/sentry-mcp-native*
 
 # nix build output
 result
