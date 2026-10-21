@@ -23,7 +23,7 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        sentry-mcp = pkgs.buildGoModule {
+        sentry-mcp = pkgs.buildGo127Module {
           pname = "sentry-mcp";
           inherit version;
           src = self;
@@ -31,7 +31,7 @@
           # vendorHash is kept current by .github/workflows/flake.yml on any
           # change to go.mod / go.sum. If you bump deps locally, set this to
           # pkgs.lib.fakeHash, run `nix build`, and paste the reported hash.
-          vendorHash = "sha256-SpFSAaRLMKctCemMT5IluxQMyDraeYKrGWmfzALPR8g=";
+          vendorHash = "sha256-h/psj9Ww4Bi/C1dnnwAzdYR/sXKz9x7C7uP2g1SBbnY=";
 
           # Version comes from the embedded package.json at runtime, so no
           # -X main.Version wiring is needed here.
@@ -58,7 +58,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = [ pkgs.go pkgs.gopls pkgs.gotools ];
+          packages = [ pkgs.go_1_27 pkgs.gopls pkgs.gotools ];
         };
       });
 
