@@ -82,6 +82,12 @@ jobs:
             packaging/mcpb/pack.sh "$bin" "$platform" "dist/sentry-mcp_${arch}.mcpb"
           done
 
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@v3
         with:
