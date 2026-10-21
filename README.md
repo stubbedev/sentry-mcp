@@ -650,7 +650,7 @@ The publish workflow verifies that `package.json` version matches the tag before
 - The npm step uses npm Trusted Publisher (OIDC), so no `NPM_TOKEN` secret is required
 - **Composer needs no publish step**: Packagist reads `composer.json` and the `vX.Y.Z` tags straight from GitHub. `composer.json` deliberately has no `version` field — the tag is the version, and the launcher reads the binary version from `package.json` at that tag, which `publish.yml` has already checked against the tag
 - The release step uses the default `GITHUB_TOKEN`
-- The **Nix flake auto-tracks releases**: `flake.nix` reads its `version` from `package.json`, so bumping the version updates the flake too. The `Flake` workflow (`.github/workflows/flake.yml`) recomputes `vendorHash` on any change to `go.mod`/`go.sum`/sources and commits it back, so `nix build` always works against `master`.
+- The **Nix flake auto-tracks releases**: `nix/package.nix` reads its `version` from `package.json`, so bumping the version updates the flake too. The `Flake` workflow (`.github/workflows/flake.yml`) recomputes `vendorHash` on any change to `go.mod`/`go.sum`/sources and commits it back, so `nix build` always works against `master`.
 
 Required setup (one-time):
 
@@ -713,4 +713,4 @@ Layout:
 - `tools.json` — tool schemas, embedded into the binary via `go:embed`
 - `bin/cli.mjs` + `scripts/` — npm wrapper (downloads + execs the binary)
 - `src/ComposerPlugin.php` + `src/Binary.php` + `bin/sentry-mcp` + `composer.json` — Composer plugin that fetches the binary at install time, plus the PHP launcher (the twin of `bin/cli.mjs`) that fetches it on first run when the plugin is not allowed
-- `flake.nix` — Nix package / app / dev shell
+- `flake.nix` — Nix flake wiring; `nix/package.nix` — package / app; `nix/shell.nix` — dev shell

@@ -46,7 +46,7 @@ clean:
     rm -f sentry-mcp
 
 # ─────────────────────────── Release ───────────────────────────
-# package.json holds the version: flake.nix reads it, and publish.yml refuses a
+# package.json holds the version: nix/package.nix reads it, and publish.yml refuses a
 # tag that disagrees with it. `npm version` bumps, commits and tags in one go
 # (with `preversion` running vet + test + smoke first), so these are wrappers
 # over the npm scripts rather than a second implementation of the same flow.
