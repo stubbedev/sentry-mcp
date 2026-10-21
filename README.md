@@ -169,9 +169,8 @@ job for an npm project. Credentials then come from each developer's `~/.sentry-m
 
 **One-click (recommended).** Grab the `.mcpb` bundle for your platform from the
 [latest release](https://github.com/stubbedev/sentry-mcp/releases/latest) —
-`sentry-mcp_darwin_arm64.mcpb` (Apple Silicon), `sentry-mcp_darwin_amd64.mcpb` (Intel Mac),
-`sentry-mcp_windows_amd64.mcpb` — then **double-click it**, drag it onto the Claude Desktop
-window, or use **Settings → Extensions → Advanced settings → Install Extension…**. The
+`sentry-mcp_darwin_arm64.mcpb` (Apple Silicon), `sentry-mcp_windows_amd64.mcpb` — then
+**double-click it**, drag it onto the Claude Desktop window, or use **Settings → Extensions → Advanced settings → Install Extension…**. The
 install dialog asks for the Sentry URL, auth token and org slug; the token is stored by
 Claude Desktop rather than in a file. Leaving the fields blank reuses an existing
 `~/.sentry-mcp.json`.
@@ -627,7 +626,7 @@ A response over ~20K tokens comes back as a shape sketch instead of its contents
 
 ## Releases (Maintainers)
 
-Each release ships prebuilt Go binaries (attached to the GitHub release), the npm wrapper `@stubbedev/sentry-mcp`, and the Composer wrapper `stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 14 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (amd64, arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — packs six of them into `.mcpb` bundles for one-click Claude Desktop install (darwin/windows/linux × amd64/arm64), attaches everything to the GitHub release, then publishes the npm package.
+Each release ships prebuilt Go binaries (attached to the GitHub release), the npm wrapper `@stubbedev/sentry-mcp`, and the Composer wrapper `stubbedev/sentry-mcp`. `.github/workflows/publish.yml` runs on a pushed `v*` tag and: cross-compiles binaries for 13 targets — linux (amd64, arm64, arm/v7, 386, ppc64le, s390x, riscv64), darwin (arm64), windows (amd64, arm64, 386), and freebsd (amd64, arm64) — packs five of them into `.mcpb` bundles for one-click Claude Desktop install (darwin arm64, windows/linux × amd64/arm64), attaches everything to the GitHub release, then publishes the npm package.
 
 Bundle sources live in `packaging/mcpb/` (`manifest.template.json`, `icon.png`, `pack.sh`). CI packs and validates one bundle on every run, so a manifest typo fails on the PR. `npm run bundle` builds one for the host platform into `dist/`.
 
