@@ -1,7 +1,7 @@
 {
-  perSystem = { lib, pkgs, self', ... }: {
+  perSystem = { inputs', lib, pkgs, self', ... }: {
     packages = {
-      sentry-mcp = pkgs.buildGo127Module {
+      sentry-mcp = (pkgs.buildGoModule.override { go = inputs'.devtools.packages.go; }) {
         pname = "sentry-mcp";
         # Version tracks the npm wrapper / git tag automatically: it is read from
         # package.json, which `npm run release:*` bumps. No manual edit needed.
