@@ -2,7 +2,7 @@ module github.com/stubbedev/sentry-mcp
 
 go 1.27.0
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 require (
 	github.com/google/jsonschema-go v0.4.3
