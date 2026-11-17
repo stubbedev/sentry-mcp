@@ -50,8 +50,7 @@ jobs:
       # Push the built x86_64-linux closure to the xilo cache so consumers can
       # substitute it instead of rebuilding. Only on master pushes — PRs (incl.
       # from forks) don't get the token. Needs the XILO_TOKEN repo secret.
-      #
-            - name: setup xilo
+      - name: setup xilo
         if: env.XILO_TOKEN != '' && github.event_name != 'pull_request'
         uses: stubbedev/xilo@v1
         with:
