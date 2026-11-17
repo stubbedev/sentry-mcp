@@ -18,7 +18,7 @@
   # or by copying these two lines into their own nix.conf. Cache is public, so
   # no auth/token is needed to pull.
   nixConfig = {
-    extra-substituters = [ "https://nix.stubbe.dev/default" ];
+    extra-substituters = [ "https://xilos.dev/c/stubbedev/main" ];
     extra-trusted-public-keys = [ "default:9P4FePqHV1rGv5NDBun0GN26y83pcaaMr/NHZrxKaac=" ];
   };
 
