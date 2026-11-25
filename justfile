@@ -42,6 +42,9 @@ nix-build:
 nix-check:
     nix flake check --print-build-logs
 
+vendor-hash:
+    nix run github:stubbedev/lys-ci/f5bf1ded8f2fbff93f695f91d9884dfccea0a62e#vendor-hash -- nix/package.nix .#default.goModules
+
 clean:
     rm -f sentry-mcp
 
